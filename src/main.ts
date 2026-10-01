@@ -14,6 +14,7 @@ import { createSwaggerConfig, exemptPublicOperations } from './config/swagger.co
 import { registerUncaughtExceptionMonitor } from './config/process-error-monitor';
 import { applyHttpTimeouts, HttpTimeoutConfig, HttpTimeoutSink } from './config/http-timeouts';
 import { applyGlobalValidation } from './config/app-validation';
+import { ApiExceptionFilter } from './common/filters/api-exception.filter';
 import { requestContextMiddleware } from './common/middleware/request-context.middleware';
 import { injectDashboardCspNonce } from './config/dashboard-csp';
 import {
@@ -253,6 +254,18 @@ async function bootstrap() {
 
   // Shared production/e2e prefix and DTO validation contract.
   applyGlobalValidation(app);
+
+  // Global catch-all so every error leaves as a well-formed Nest envelope
+  // `{ statusCode, message, error }` with the real reason in `message`.
+  //
+  // Without it a bare `Error` is flattened by Nest's default handler to
+  // `{ statusCode: 500, message: 'Internal server error' }` — no `error` key, reason gone. Clients
+  // that detect the envelope by key (the `@rmyndharis/openwa` SDK's `isNestEnvelope`) then fall back
+  // to `String()`-ing the whole body, which renders an object as `[object Object]`. That is how a
+  // whatsapp-web.js in-page media failure reached our operator dashboard as the literal string
+  // "OpenWA API 500 Internal Server Error — POST /api/sessions/<id>/messages/send-image:
+  // [object Object]". See common/filters/api-exception.filter.ts.
+  app.useGlobalFilters(new ApiExceptionFilter());
 
   // Swagger documentation. ENABLE_SWAGGER wins; otherwise default on outside production, off in
   // production (the API schema is reconnaissance surface — production opts in with ENABLE_SWAGGER=true).
