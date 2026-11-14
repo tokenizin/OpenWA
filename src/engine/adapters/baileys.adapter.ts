@@ -135,6 +135,19 @@ export class BaileysAdapter implements IWhatsAppEngine {
    *  the backoff counter restarts from scratch instead of inheriting an old incident's attempts. */
   private static readonly RECONNECT_STABILITY_RESET_MS = 5 * 60_000;
 
+  /**
+   * Upper bound for one profile-picture lookup.
+   *
+   * `sock.profilePictureUrl` can fail to settle at all for a contact missing from the store, and a
+   * `catch` cannot catch a promise that never rejects — the failure surfaced as a hang that no layer
+   * bounded (the SDK's 30s default was the only thing eventually stopping it, ~3x longer than the
+   * inbox waits). Bounded here at the source so every caller benefits.
+   *
+   * 3s: a measured healthy lookup returns in ~0.46s, so this is ~6.5x headroom for a cold store and
+   * a WhatsApp round-trip, while staying inside the sidecar's 6s bound.
+   */
+  static readonly PROFILE_PICTURE_TIMEOUT_MS = 3_000;
+
   private readonly logger = createLogger('BaileysAdapter');
   // Bound concurrent inbound media downloads: each materialises a full decrypted buffer in heap, so an
   // unbounded fire-and-forget loop lets a sender flood the gateway with N parallel multi-MB allocations.
@@ -931,15 +944,29 @@ export class BaileysAdapter implements IWhatsAppEngine {
 
   async getProfilePicture(contactId: string): Promise<string | null> {
     this.ensureReady();
-    try {
-      return (await this.sock!.profilePictureUrl(contactId, 'image')) ?? null;
-    } catch (err) {
-      this.logger.debug('profilePictureUrl failed; no picture or hidden', {
-        contactId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null; // no picture set, or hidden by privacy
-    }
+    // Mirror of the per-id deadline already used by ContactService.getProfilePictures, so the
+    // per-contact and batch paths cannot drift apart again.
+    const url = await new Promise<string | null>(resolve => {
+      const timer = setTimeout(
+        () => resolve(null),
+        BaileysAdapter.PROFILE_PICTURE_TIMEOUT_MS,
+      );
+      this.sock!.profilePictureUrl(contactId, 'image').then(
+        value => {
+          clearTimeout(timer);
+          resolve(value ?? null);
+        },
+        err => {
+          clearTimeout(timer);
+          this.logger.debug('profilePictureUrl failed; no picture or hidden', {
+            contactId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          resolve(null); // no picture set, or hidden by privacy
+        },
+      );
+    });
+    return url;
   }
 
   async blockContact(contactId: string): Promise<void> {

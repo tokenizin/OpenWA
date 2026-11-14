@@ -27,6 +27,14 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     errors.push(`DATABASE_TYPE must be "sqlite" or "postgres" (got "${dbType}")`);
   }
 
+  // The auth/audit ("main") connection is independently pluggable via MAIN_DATABASE_TYPE. Same
+  // no-silent-fallback rule as DATABASE_TYPE: a typo must fail at boot, not quietly leave api_keys
+  // and audit_logs in ./data/main.sqlite while the data connection sits on Postgres.
+  const mainDbType = str('MAIN_DATABASE_TYPE');
+  if (mainDbType && mainDbType !== 'sqlite' && mainDbType !== 'postgres') {
+    errors.push(`MAIN_DATABASE_TYPE must be "sqlite" or "postgres" (got "${mainDbType}")`);
+  }
+
   // Whitelist the registered engine/storage ids so a typo fails fast at boot instead of silently
   // falling back to the default (engine.factory swallows an unknown ENGINE_TYPE → legacy wwebjs;
   // STORAGE_TYPE → local). Values must match the ids registered in engine.factory / configuration.
@@ -70,6 +78,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
         errors.push(`POSTGRES_SCHEMA must not use the reserved "pg_" prefix (got ${JSON.stringify(pgSchema)})`);
       }
     }
+
   } else {
     // SQLite (explicit or default): DATABASE_NAME is a file path for the 'data' connection. It must
     // not resolve to the 'main' DB file — two TypeORM connections on one SQLite file run separate
@@ -88,6 +97,56 @@ export function validateEnv(config: EnvConfig): EnvConfig {
         `DATABASE_NAME must be a file path under the data volume for SQLite (e.g. ./data/openwa.sqlite); got ${JSON.stringify(
           dataDbName,
         )}. A bare name is the PostgreSQL DB name — leave DATABASE_NAME unset for SQLite to use the default ./data/openwa.sqlite.`,
+      );
+    }
+  }
+
+  // Auth/audit connection on Postgres. Credentials fall back to the data connection's
+  // DATABASE_* vars, so only require them when the main connection supplies NEITHER its own
+  // MAIN_DATABASE_* nor the data connection's DATABASE_* (i.e. nothing can authenticate).
+  if (mainDbType === 'postgres') {
+    const resolved = (mainKey: string, dataKey: string): string | undefined =>
+      str(mainKey) ?? str(dataKey);
+
+    for (const [mainKey, dataKey] of [
+      ['MAIN_DATABASE_USERNAME', 'DATABASE_USERNAME'],
+      ['MAIN_DATABASE_PASSWORD', 'DATABASE_PASSWORD'],
+    ] as const) {
+      if (!resolved(mainKey, dataKey)) {
+        errors.push(`${mainKey} (or ${dataKey}) is required when MAIN_DATABASE_TYPE=postgres`);
+      }
+    }
+
+    // Same identifier rules as POSTGRES_SCHEMA. Defaults to 'main' in configuration.ts, which
+    // keeps auth/audit tables out of 'public' so both connections can share one database.
+    const mainPgSchema = str('POSTGRES_MAIN_SCHEMA');
+    if (mainPgSchema !== undefined) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(mainPgSchema)) {
+        errors.push(
+          `POSTGRES_MAIN_SCHEMA must be a valid Postgres identifier (a letter or underscore, then letters/digits/underscores, max 63 chars; got ${JSON.stringify(mainPgSchema)})`,
+        );
+      } else if (mainPgSchema.toLowerCase().startsWith('pg_')) {
+        errors.push(
+          `POSTGRES_MAIN_SCHEMA must not use the reserved "pg_" prefix (got ${JSON.stringify(mainPgSchema)})`,
+        );
+      }
+    }
+
+    // MAIN_DATABASE_NAME is the SQLite file path and is IGNORED when MAIN_DATABASE_TYPE=postgres
+    // (which reads MAIN_DATABASE_NAME_PG). Leaving it set is harmless but misleading — flag the
+    // combination so an operator does not assume edits to it move the auth DB.
+    if (str('MAIN_DATABASE_NAME') && !str('MAIN_DATABASE_NAME_PG')) {
+      errors.push(
+        'MAIN_DATABASE_NAME is the SQLite file path and is ignored when MAIN_DATABASE_TYPE=postgres; set MAIN_DATABASE_NAME_PG to the Postgres database name (defaults to DATABASE_NAME).',
+      );
+    }
+
+    // The Postgres main connection always runs migrations (synchronize is hardcoded false),
+    // so MAIN_DATABASE_SYNCHRONIZE=true would silently do nothing — and worse, an operator
+    // setting it to "fix" a missing table would get no error.
+    if (config['MAIN_DATABASE_SYNCHRONIZE'] === 'true') {
+      errors.push(
+        'MAIN_DATABASE_SYNCHRONIZE=true has no effect when MAIN_DATABASE_TYPE=postgres: the Postgres auth connection always runs the main-owned migrations instead of synchronize. Unset it (the default) and manage the schema via `npm run migration:run:main`.',
       );
     }
   }

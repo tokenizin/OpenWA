@@ -46,12 +46,29 @@ export default () => ({
     enabled: process.env.CACHE_ENABLED === 'true',
   },
 
-  // Main Database configuration (always SQLite for boot config)
+  // Main Database configuration (pluggable: SQLite or PostgreSQL, for boot config / auth / audit)
   database: {
-    type: 'sqlite' as const,
+    // MAIN_DATABASE_TYPE selects the auth/audit connection, mirroring the data connection's
+    // DATABASE_TYPE. Defaults to 'sqlite' so every existing deploy keeps its ./data/main.sqlite.
+    type: (process.env.MAIN_DATABASE_TYPE || 'sqlite') as 'sqlite' | 'postgres',
     // SQLite file for the auth/audit DB. Overridable (e.g. e2e points it at a temp file) so tests
     // never write api keys into the developer's ./data/main.sqlite.
     database: process.env.MAIN_DATABASE_NAME || './data/main.sqlite',
+    // Postgres connection for the auth/audit DB. Falls back to the DATA connection's
+    // DATABASE_* vars so a single set of credentials drives both connections — with the main
+    // connection isolated in its own schema (POSTGRES_MAIN_SCHEMA, default 'main') so auth/audit
+    // tables never collide with the data tables in the same database.
+    host: process.env.MAIN_DATABASE_HOST || process.env.DATABASE_HOST || 'localhost',
+    port: parseInt(process.env.MAIN_DATABASE_PORT || process.env.DATABASE_PORT || '5432', 10),
+    username: process.env.MAIN_DATABASE_USERNAME || process.env.DATABASE_USERNAME,
+    password: process.env.MAIN_DATABASE_PASSWORD || process.env.DATABASE_PASSWORD,
+    name: process.env.MAIN_DATABASE_NAME_PG || process.env.DATABASE_NAME || 'openwa',
+    // Dedicated schema for auth/audit tables. Keeping them out of 'public' means both
+    // connections can share one database without any table-name overlap.
+    schema: process.env.POSTGRES_MAIN_SCHEMA || 'main',
+    poolSize: parseInt(process.env.MAIN_DATABASE_POOL_SIZE || process.env.DATABASE_POOL_SIZE || '10', 10),
+    ssl: process.env.DATABASE_SSL === 'true',
+    sslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
     // Schema management for the auth/audit DB. Default ON (zero-config first boot).
     // Set MAIN_DATABASE_SYNCHRONIZE=false to manage schema via the main-owned migrations
     // instead (migrationsRun then creates api_keys/audit_logs). When disabled, run the

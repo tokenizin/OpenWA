@@ -7,15 +7,23 @@
  * PostgreSQL has native `jsonb` and `timestamp` types with better
  * indexing and query performance.
  *
- * DATA CONNECTION ONLY. These resolve the dialect of the *data* connection from the global
- * `DATABASE_TYPE` env var. Use them only on entities bound to the data connection. Entities on the
- * MAIN connection (auth, audit) are ALWAYS SQLite — it is hardcoded `type: 'better-sqlite3'` in
- * app.module.ts regardless of DATABASE_TYPE — so they must hardcode `simple-json` / `datetime`
- * (see audit-log.entity.ts) and must NOT call these helpers, or a Postgres deployment would emit a
- * `jsonb`/`timestamp` column on the always-SQLite main DB.
+ * MAIN-CONNECTION entities (auth, audit) are ALSO now dialect-aware. They used to be
+ * hardcoded-SQLite-only (type: 'better-sqlite3' was unconditional in app.module.ts); the main
+ * connection is independently pluggable via MAIN_DATABASE_TYPE, so those entities must resolve
+ * their dialect from MAIN_DATABASE_TYPE — NOT DATABASE_TYPE, which governs the data connection.
+ * Hardcoding `simple-json` / `datetime` there would emit a jsonb/timestamp column on a Postgres
+ * main DB (or a datetime column on SQLite, which is still supported there).
  */
 
 const isPostgres = (): boolean => process.env.DATABASE_TYPE === 'postgres';
+
+/**
+ * Dialect of the MAIN (auth/audit) connection. Falls back to DATABASE_TYPE so a deployment that
+ * sets only DATABASE_TYPE=postgres and leaves MAIN_DATABASE_TYPE unset still gets Postgres if the
+ * main connection is later moved; otherwise it stays on its SQLite default.
+ */
+export const isMainPostgres = (): boolean =>
+  (process.env.MAIN_DATABASE_TYPE ?? process.env.DATABASE_TYPE) === 'postgres';
 
 /**
  * Always 'simple-json' (TypeORM JSON.stringify/parse over a `text` column), on BOTH dialects.
@@ -34,3 +42,15 @@ export const jsonColumnType = (): 'simple-json' => 'simple-json';
  * Use with DateTransformer for SQLite compatibility.
  */
 export const dateColumnType = (): 'timestamp' | 'text' => (isPostgres() ? 'timestamp' : 'text');
+
+/**
+ * MAIN-connection counterpart of {@link dateColumnType}: 'timestamp' on Postgres, 'datetime' on
+ * SQLite. `datetime` (not `text`) preserves the historical SQLite column type, so existing
+ * main.sqlite databases keep their current schema — the main-owned migrations create `datetime`
+ * columns on SQLite, and 'text' would diverge from those tables.
+ *
+ * Always pair with {@link DateTransformer}: it normalises both directions, so a value written on
+ * one dialect reads back as a Date after a migration to the other.
+ */
+export const mainDateColumnType = (): 'timestamp' | 'datetime' =>
+  isMainPostgres() ? 'timestamp' : 'datetime';

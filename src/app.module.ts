@@ -104,7 +104,7 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       validate: validateEnv,
     }),
 
-    // Main Database (always SQLite - boot config)
+    // Main Database (auth/audit/boot config — SQLite or PostgreSQL)
     TypeOrmModule.forRootAsync({
       name: 'main',
       imports: [ConfigModule],
@@ -114,10 +114,8 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
         // (MAIN_DATABASE_SYNCHRONIZE=false), the main-owned migrations create the
         // api_keys/audit_logs schema instead — never both at once.
         const synchronize = configService.get<boolean>('database.synchronize', true);
-        return {
+        const baseConfig = {
           name: 'main',
-          type: 'better-sqlite3' as const,
-          database: configService.get<string>('database.database', './data/main.sqlite'),
           entities: [
             __dirname + '/modules/auth/**/*.entity{.ts,.js}',
             __dirname + '/modules/audit/**/*.entity{.ts,.js}',
@@ -125,9 +123,45 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
           // Dedicated migrations dir for the main connection only (must NOT run the
           // data-connection migrations, which target session/webhook/message tables).
           migrations: [__dirname + '/database/migrations-main/*{.ts,.js}'],
+          logging: configService.get<boolean>('database.logging', false),
+        };
+
+        if (configService.get<string>('database.type', 'sqlite') === 'postgres') {
+          // Same schema/search_path contract as the data connection: a non-public schema also
+          // sets the session search_path via pg's startup `options`, so the main-owned
+          // migrations' RAW DDL lands in the configured schema rather than public.
+          const schema = configService.get<string>('database.schema', 'main');
+          const useCustomSearchPath = schema && schema !== 'public';
+          return {
+            ...baseConfig,
+            type: 'postgres' as const,
+            schema,
+            host: configService.get<string>('database.host'),
+            port: configService.get<number>('database.port'),
+            username: configService.get<string>('database.username'),
+            password: configService.get<string>('database.password'),
+            database: configService.get<string>('database.name', 'openwa'),
+            ssl: configService.get<boolean>('database.ssl', false)
+              ? { rejectUnauthorized: configService.get<boolean>('database.sslRejectUnauthorized', true) }
+              : false,
+            // Never auto-sync Postgres; rely on migrations.
+            synchronize: false,
+            migrationsRun: true,
+            retryAttempts: 10,
+            retryDelay: 3000,
+            extra: {
+              max: configService.get<number>('database.poolSize', 10),
+              ...(useCustomSearchPath ? { options: `-c search_path=${schema},public` } : {}),
+            },
+          };
+        }
+
+        return {
+          ...baseConfig,
+          type: 'better-sqlite3' as const,
+          database: configService.get<string>('database.database', './data/main.sqlite'),
           synchronize,
           migrationsRun: !synchronize,
-          logging: configService.get<boolean>('database.logging', false),
         };
       },
     }),

@@ -2978,6 +2978,14 @@ describe('BaileysAdapter profile + block', () => {
     expect(await adapter.getProfilePicture('628222@s.whatsapp.net')).toBeNull();
   });
 
+  it('getProfilePicture resolves null within the budget when profilePictureUrl never settles', async () => {
+    fakeSock.profilePictureUrl.mockImplementationOnce(() => new Promise(() => {}));
+    const adapter = await ready();
+    const started = Date.now();
+    await expect(adapter.getProfilePicture('628333@s.whatsapp.net')).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThan(BaileysAdapter.PROFILE_PICTURE_TIMEOUT_MS + 500);
+  });
+
   it('blockContact / unblockContact call updateBlockStatus', async () => {
     const adapter = await ready();
     await adapter.blockContact('628111@s.whatsapp.net');
