@@ -39,24 +39,78 @@ export const retryMainConnection = (err: unknown): boolean => !(err instanceof M
 export function mainConnectionOptions(
   configService: ConfigService,
 ): DataSourceOptions & { name: string; toRetry: (err: unknown) => boolean } {
+  const entities = [
+    join(__dirname, '..', 'modules/auth/**/*.entity{.ts,.js}'),
+    join(__dirname, '..', 'modules/audit/**/*.entity{.ts,.js}'),
+  ];
+  // Dedicated migrations dir for the main connection only (must NOT run the data-connection
+  // migrations, which target session/webhook/message tables).
+  const migrations = [join(__dirname, 'migrations-main/*{.ts,.js}')];
+  const logging = configService.get<boolean>('database.logging', false);
+  // Read by createMainDataSource, which owns the schema steps (initialize() never runs them).
+  const synchronize = configService.get<boolean>('database.synchronize', false);
+
+  if (configService.get<string>('database.type', 'sqlite') === 'postgres') {
+    // Same schema/search_path contract as the data connection: a non-public schema also sets the session
+    // search_path via pg's startup `options`, so the main-owned migrations' RAW DDL lands in the configured
+    // schema rather than public.
+    const schema = configService.get<string>('database.schema', 'main');
+    const useCustomSearchPath = schema && schema !== 'public';
+    return {
+      // Nest's TypeOrmCoreModule resolves the DataSource to close at shutdown from these options.
+      name: 'main',
+      type: 'postgres',
+      schema,
+      host: configService.get<string>('database.host'),
+      port: configService.get<number>('database.port'),
+      username: configService.get<string>('database.username'),
+      password: configService.get<string>('database.password'),
+      database: configService.get<string>('database.name', 'openwa'),
+      ssl: configService.get<boolean>('database.ssl', false)
+        ? { rejectUnauthorized: configService.get<boolean>('database.sslRejectUnauthorized', true) }
+        : false,
+      entities,
+      migrations,
+      synchronize,
+      logging,
+      extra: {
+        max: configService.get<number>('database.poolSize', 10),
+        ...(useCustomSearchPath ? { options: `-c search_path=${schema},public` } : {}),
+      },
+      toRetry: retryMainConnection,
+    };
+  }
+
   return {
     // Nest's TypeOrmCoreModule resolves the DataSource to close at shutdown from these options.
     name: 'main',
     type: 'better-sqlite3',
     database: configService.get<string>('database.database', './data/main.sqlite'),
     timeout: SQLITE_BUSY_TIMEOUT_MS,
-    entities: [
-      join(__dirname, '..', 'modules/auth/**/*.entity{.ts,.js}'),
-      join(__dirname, '..', 'modules/audit/**/*.entity{.ts,.js}'),
-    ],
-    // Dedicated migrations dir for the main connection only (must NOT run the data-connection
-    // migrations, which target session/webhook/message tables).
-    migrations: [join(__dirname, 'migrations-main/*{.ts,.js}')],
-    // Read by createMainDataSource, which owns the schema steps (initialize() never runs them).
-    synchronize: configService.get<boolean>('database.synchronize', false),
-    logging: configService.get<boolean>('database.logging', false),
+    entities,
+    migrations,
+    synchronize,
+    logging,
     toRetry: retryMainConnection,
   };
+}
+
+/**
+ * Columns a table has right now, for the schema-mismatch check. SQLite answers PRAGMA table_info; Postgres
+ * answers information_schema scoped to the connection's schema, so a same-named table in another schema
+ * is never read in its place.
+ */
+async function presentColumns(ds: DataSource, tableName: string): Promise<Set<string>> {
+  if (ds.options.type === 'postgres') {
+    const schema = (ds.options as { schema?: string }).schema || 'public';
+    const rows = await ds.query<Array<{ column_name: string }>>(
+      'SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2',
+      [schema, tableName],
+    );
+    return new Set(rows.map(r => r.column_name));
+  }
+  const rows = await ds.query<Array<{ name: string }>>(`PRAGMA table_info("${tableName}")`);
+  return new Set(rows.map(r => r.name));
 }
 
 /**
@@ -91,8 +145,7 @@ export async function createMainDataSource(options?: DataSourceOptions): Promise
 
     const missing: string[] = [];
     for (const metadata of ds.entityMetadatas) {
-      const rows = await ds.query<Array<{ name: string }>>(`PRAGMA table_info("${metadata.tableName}")`);
-      const present = new Set(rows.map(r => r.name));
+      const present = await presentColumns(ds, metadata.tableName);
       for (const column of metadata.columns) {
         if (!present.has(column.databaseName)) missing.push(`${metadata.tableName}.${column.databaseName}`);
       }

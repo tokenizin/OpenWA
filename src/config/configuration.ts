@@ -172,9 +172,21 @@ export default () => ({
     enabled: process.env.CACHE_ENABLED === 'true',
   },
 
-  // Main Database configuration (always SQLite for boot config)
+  // Main (auth/audit) database. SQLite by default (./data/main.sqlite), independent of the data connection.
+  // MAIN_DATABASE_TYPE=postgres puts it in Postgres, in POSTGRES_MAIN_SCHEMA (default 'main', so it never
+  // collides with the data tables). The Postgres credentials fall back to the DATABASE_* variables, so one
+  // set drives both connections.
   database: {
-    type: 'sqlite' as const,
+    type: process.env.MAIN_DATABASE_TYPE === 'postgres' ? 'postgres' : 'sqlite',
+    host: process.env.MAIN_DATABASE_HOST || process.env.DATABASE_HOST || 'localhost',
+    port: parseInt(process.env.MAIN_DATABASE_PORT || process.env.DATABASE_PORT || '5432', 10),
+    username: process.env.MAIN_DATABASE_USERNAME || process.env.DATABASE_USERNAME,
+    password: process.env.MAIN_DATABASE_PASSWORD || process.env.DATABASE_PASSWORD,
+    name: process.env.MAIN_DATABASE_NAME_PG || process.env.DATABASE_NAME || 'openwa',
+    schema: process.env.POSTGRES_MAIN_SCHEMA || 'main',
+    poolSize: parseInt(process.env.MAIN_DATABASE_POOL_SIZE || process.env.DATABASE_POOL_SIZE || '10', 10),
+    ssl: process.env.DATABASE_SSL === 'true',
+    sslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
     // SQLite file for the auth/audit DB. Overridable (e.g. e2e points it at a temp file) so tests
     // never write api keys into the developer's ./data/main.sqlite.
     database: process.env.MAIN_DATABASE_NAME || './data/main.sqlite',

@@ -905,8 +905,9 @@ Migrations are hand-authored and idempotent (`IF NOT EXISTS`) so they are safe t
 ### Migration Files
 
 ```
-src/database/migrations-main/      # main connection (auth + audit, SQLite)
-├── 1779900000000-CreateAuthAuditTables.ts   # creates api_keys + audit_logs
+src/database/migrations-main/      # main connection (auth + audit: SQLite, or Postgres when MAIN_DATABASE_TYPE=postgres)
+├── 1779900000000-CreateAuthAuditTables.ts   # creates api_keys + audit_logs (dialect-aware)
+├── 1782500000000-MainUuidDefaults.ts        # Postgres-only: gen_random_uuid() id DEFAULTs on the main tables
 ├── 1786600000000-AddApiKeyAllowedChats.ts   # adds api_keys.allowedChats
 └── 1786610000000-DropSynchronizeIndexDuplicates.ts  # drops synchronize-named duplicate indexes
 

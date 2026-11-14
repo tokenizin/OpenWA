@@ -127,7 +127,7 @@ if (dashboardServingEnabled && dashboardBuildPresent) {
       validate: validateEnv,
     }),
 
-    // Main Database (always SQLite - boot config)
+    // Main Database (auth/audit/boot config — SQLite or PostgreSQL)
     TypeOrmModule.forRootAsync({
       name: 'main',
       imports: [ConfigModule],

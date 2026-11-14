@@ -149,6 +149,14 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     errors.push(`DATABASE_TYPE must be "sqlite" or "postgres" (got ${JSON.stringify(dbType)})`);
   }
 
+  // The auth/audit ("main") connection is independently pluggable via MAIN_DATABASE_TYPE. Same
+  // no-silent-fallback rule as DATABASE_TYPE: a typo must fail at boot, not quietly leave api_keys and
+  // audit_logs in ./data/main.sqlite while the data connection sits on Postgres.
+  const mainDbType = str('MAIN_DATABASE_TYPE');
+  if (mainDbType && mainDbType !== 'sqlite' && mainDbType !== 'postgres') {
+    errors.push(`MAIN_DATABASE_TYPE must be "sqlite" or "postgres" (got "${mainDbType}")`);
+  }
+
   // Whitelist the registered engine/storage ids so a typo fails fast at boot: an unknown ENGINE_TYPE
   // would otherwise fail every session start, and an unknown STORAGE_TYPE would silently fall back to
   // local. Values must match the ids registered in engine.factory / configuration.
@@ -283,6 +291,52 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   // would validate one value and then configure another. Requiring digits keeps the validated
   // value identical to the parsed one.
   const DECIMAL_INTEGER = /^\d+$/;
+
+  // Auth/audit connection on Postgres. Credentials fall back to the data connection's DATABASE_* vars, so
+  // only require them when neither the main connection's own MAIN_DATABASE_* nor DATABASE_* is set.
+  if (mainDbType === 'postgres') {
+    const resolved = (mainKey: string, dataKey: string): string | undefined => str(mainKey) ?? str(dataKey);
+
+    for (const [mainKey, dataKey] of [
+      ['MAIN_DATABASE_USERNAME', 'DATABASE_USERNAME'],
+      ['MAIN_DATABASE_PASSWORD', 'DATABASE_PASSWORD'],
+    ] as const) {
+      if (!resolved(mainKey, dataKey)) {
+        errors.push(`${mainKey} (or ${dataKey}) is required when MAIN_DATABASE_TYPE=postgres`);
+      }
+    }
+
+    // Same identifier rules as POSTGRES_SCHEMA. Defaults to 'main' in configuration.ts, which keeps
+    // auth/audit tables out of 'public' so both connections can share one database.
+    const mainPgSchema = str('POSTGRES_MAIN_SCHEMA');
+    if (mainPgSchema !== undefined) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(mainPgSchema)) {
+        errors.push(
+          `POSTGRES_MAIN_SCHEMA must be a valid Postgres identifier (a letter or underscore, then letters/digits/underscores, max 63 chars; got ${JSON.stringify(mainPgSchema)})`,
+        );
+      } else if (mainPgSchema.toLowerCase().startsWith('pg_')) {
+        errors.push(
+          `POSTGRES_MAIN_SCHEMA must not use the reserved "pg_" prefix (got ${JSON.stringify(mainPgSchema)})`,
+        );
+      }
+    }
+
+    // MAIN_DATABASE_NAME is the SQLite file path and is ignored when MAIN_DATABASE_TYPE=postgres (which reads
+    // MAIN_DATABASE_NAME_PG). Flag the combination so an operator does not assume edits to it move the auth DB.
+    if (str('MAIN_DATABASE_NAME') && !str('MAIN_DATABASE_NAME_PG')) {
+      errors.push(
+        'MAIN_DATABASE_NAME is the SQLite file path and is ignored when MAIN_DATABASE_TYPE=postgres; set MAIN_DATABASE_NAME_PG to the Postgres database name (defaults to DATABASE_NAME).',
+      );
+    }
+
+    // The Postgres main connection always runs the main-owned migrations (synchronize is hardcoded false
+    // there, see main-connection.ts), so MAIN_DATABASE_SYNCHRONIZE=true would silently do nothing.
+    if (config['MAIN_DATABASE_SYNCHRONIZE'] === 'true') {
+      errors.push(
+        'MAIN_DATABASE_SYNCHRONIZE=true has no effect when MAIN_DATABASE_TYPE=postgres: the Postgres auth connection always runs the main-owned migrations. Unset it and manage the schema via `npm run migration:run:main`.',
+      );
+    }
+  }
 
   const checkPort = (key: string, read: (key: string) => string | undefined = str): void => {
     const raw = read(key);

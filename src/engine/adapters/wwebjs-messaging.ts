@@ -15,7 +15,7 @@ import {
   Quotable,
 } from '../interfaces/whatsapp-engine.interface';
 import { MessageWithReactions, SerializedWid, readWid } from '../types/whatsapp-web-js.types';
-import { BadRequestException, NotImplementedException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException, NotImplementedException } from '@nestjs/common';
 import { MessageNotFoundError } from '../../common/errors/message-not-found.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
 import { loadRemoteMediaBuffer } from '../../common/media/load-remote-media';
@@ -337,7 +337,11 @@ export async function toMessageMedia(
  */
 export function toMessageResult(msg: Message | undefined): MessageResult {
   if (!msg) {
-    throw new Error(
+    // An `InternalServerErrorException`, not a bare `Error`: with no global exception filter a bare Error is
+    // flattened to `{ statusCode: 500, message: 'Internal server error' }` and the reason is lost, so neither the
+    // `message:failed` hook nor the API caller can tell a transient send failure from a permanent one. Same
+    // precedent as the status path. See common/filters/api-exception.filter.ts.
+    throw new InternalServerErrorException(
       'the engine returned no message for this send, so it may not have been delivered — check the chat before retrying',
     );
   }

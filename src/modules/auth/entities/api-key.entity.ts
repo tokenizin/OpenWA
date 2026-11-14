@@ -1,4 +1,6 @@
 import { Entity, Column, PrimaryGeneratedColumn, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
+import { mainDateColumnType } from '../../../common/utils/column-types';
+import { MainDateTransformer } from '../../../common/transformers/date.transformer';
 
 export enum ApiKeyRole {
   ADMIN = 'admin',
@@ -46,10 +48,13 @@ export class ApiKey {
   @Column({ type: 'boolean', default: true })
   isActive!: boolean;
 
-  @Column({ type: 'datetime', nullable: true })
+  // mainDateColumnType() → 'datetime' on SQLite (unchanged) / 'timestamp' on Postgres. MainDateTransformer
+  // keeps a JS Date on both sides and writes a native Date to pg's timestamp, while SQLite keeps
+  // its historical ISO-string form — so expiry checks behave identically either way.
+  @Column({ type: mainDateColumnType(), nullable: true, transformer: MainDateTransformer })
   expiresAt!: Date | null;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ type: mainDateColumnType(), nullable: true, transformer: MainDateTransformer })
   lastUsedAt!: Date | null;
 
   @Column({ type: 'int', default: 0 })
