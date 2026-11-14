@@ -2,6 +2,7 @@ import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
 import {
   BaileysMediaFetch,
   classifyFetchFailure,
+  statusOf,
   messageFromRef,
   type BaileysMediaFetchHost,
 } from './baileys-media-fetch';
@@ -77,21 +78,44 @@ describe('messageFromRef', () => {
   });
 });
 
+const boom = (
+  statusCode: number,
+  message = 'Failed to fetch stream from https://mmg.whatsapp.net/v/t/abc?oh=SECRET&oe=1',
+) => Object.assign(new Error(message), { output: { statusCode } });
+
+describe('statusOf', () => {
+  it('reads the status of a Boom (output.statusCode), which is what Baileys throws, and a plain status', () => {
+    expect(statusOf(boom(404))).toBe(404);
+    expect(statusOf({ status: 410 })).toBe(410);
+    expect(statusOf(new Error('x'))).toBeUndefined();
+    expect(statusOf(null)).toBeUndefined();
+  });
+});
+
 describe('classifyFetchFailure', () => {
-  it('404 and 410 are expired, as an HTTP status or as a Boom', () => {
-    expect(classifyFetchFailure({ status: 404 }).reason).toBe('expired');
-    expect(classifyFetchFailure({ status: 410 }).reason).toBe('expired');
-    expect(
-      classifyFetchFailure({ output: { statusCode: 404 }, message: 'Media re-upload failed by device (NOT_FOUND)' }),
-    ).toEqual({
+  it('a failure of the first download is a plain error, with the HTTP status and no signed address', () => {
+    const out = classifyFetchFailure(boom(500));
+    expect(out.reason).toBe('error');
+    expect(out.detail).toBe('HTTP 500: Failed to fetch stream from mmg.whatsapp.net');
+    expect(out.detail).not.toContain('SECRET');
+  });
+
+  it('a re-upload the phone answers not found is final: the phone no longer has the file', () => {
+    expect(classifyFetchFailure(boom(404, 'Media re-upload failed by device (NOT_FOUND)'), 'reupload')).toEqual({
       reason: 'expired',
-      detail: 'Media re-upload failed by device (NOT_FOUND)',
+      detail: 'the phone no longer has the file (HTTP 404: Media re-upload failed by device (NOT_FOUND))',
     });
   });
-  it('anything else is a plain error, with its message', () => {
-    expect(classifyFetchFailure(new Error('bad decrypt'))).toEqual({ reason: 'error', detail: 'bad decrypt' });
-    expect(classifyFetchFailure({ status: 500 }).reason).toBe('error');
-    expect(classifyFetchFailure('weird').detail).toBe('weird');
+
+  it('any other failure of the re-upload request is an error to retry', () => {
+    expect(classifyFetchFailure(boom(418, 'general error'), 'reupload').reason).toBe('error');
+    expect(classifyFetchFailure(new Error('socket closed'), 'reupload').reason).toBe('error');
+  });
+
+  it('a link still dead after the re-upload is final; another failure is not', () => {
+    for (const code of [403, 404, 410]) expect(classifyFetchFailure(boom(code), 'redownload').reason).toBe('expired');
+    expect(classifyFetchFailure(boom(500), 'redownload').reason).toBe('error');
+    expect(classifyFetchFailure(new Error('bad decrypt'), 'redownload').reason).toBe('error');
   });
 });
 
@@ -101,20 +125,61 @@ describe('BaileysMediaFetch.fetchByRef', () => {
     expect(await fetch.fetchByRef(ref())).toEqual({ ok: true, bytes: Buffer.from('abcd'), mimetype: 'image/jpeg' });
   });
 
-  it('hands Baileys a message rebuilt from the reference, and a re-upload hook backed by the phone', async () => {
-    const updateMediaMessage = jest.fn((m: WAMessage) => Promise.resolve(m));
-    const { fetch, downloadMediaMessage } = build(() => chunks('x'), { updateMediaMessage });
+  it('hands Baileys a message rebuilt from the reference, and does not use its own re-upload hook', async () => {
+    const { fetch, downloadMediaMessage } = build(() => chunks('x'));
     await fetch.fetchByRef(ref());
-    const [msg, type, , ctx] = downloadMediaMessage.mock.calls[0] as unknown as [
-      WAMessage,
-      string,
-      unknown,
-      { reuploadRequest: (m: WAMessage) => Promise<WAMessage> },
-    ];
+    const [msg, type, , ctx] = downloadMediaMessage.mock.calls[0] as unknown as [WAMessage, string, unknown, unknown];
     expect(type).toBe('stream');
     expect(msg.key.remoteJid).toBe('628111@s.whatsapp.net');
-    await ctx.reuploadRequest(msg);
-    expect(updateMediaMessage).toHaveBeenCalledWith(msg);
+    expect(ctx).toBeUndefined();
+  });
+
+  it('asks the phone to upload the file again when the link is dead, then downloads from the new address', async () => {
+    const refreshed = { key: { id: 'M1' }, message: { imageMessage: { directPath: '/v/new', url: undefined } } };
+    const updateMediaMessage = jest.fn(() => Promise.resolve(refreshed as unknown as WAMessage));
+    let calls = 0;
+    const { fetch, downloadMediaMessage } = build(() => (++calls === 1 ? Promise.reject(boom(404)) : chunks('fresh')), {
+      updateMediaMessage,
+    });
+    const out = await fetch.fetchByRef(ref());
+    expect(out).toEqual({ ok: true, bytes: Buffer.from('fresh'), mimetype: 'image/jpeg' });
+    expect(updateMediaMessage).toHaveBeenCalledTimes(1);
+    expect(downloadMediaMessage.mock.calls[1][0]).toBe(refreshed);
+  });
+
+  it.each([403, 404, 410])('treats HTTP %i as a dead link and asks the phone', async code => {
+    const updateMediaMessage = jest.fn((m: WAMessage) => Promise.resolve(m));
+    let calls = 0;
+    const { fetch } = build(() => (++calls === 1 ? Promise.reject(boom(code)) : chunks('ok')), { updateMediaMessage });
+    expect(await fetch.fetchByRef(ref())).toMatchObject({ ok: true });
+    expect(updateMediaMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not bother the phone for a failure that is not about the link', async () => {
+    const updateMediaMessage = jest.fn((m: WAMessage) => Promise.resolve(m));
+    const { fetch } = build(() => Promise.reject(boom(500)), { updateMediaMessage });
+    const out = await fetch.fetchByRef(ref());
+    expect(out).toMatchObject({ ok: false, reason: 'error' });
+    expect(out.ok ? '' : out.detail).toContain('HTTP 500');
+    expect(updateMediaMessage).not.toHaveBeenCalled();
+  });
+
+  it('says expired when the phone answers that it no longer has the file', async () => {
+    const updateMediaMessage = jest.fn(() => Promise.reject(boom(404, 'Media re-upload failed by device (NOT_FOUND)')));
+    const { fetch } = build(() => Promise.reject(boom(404)), { updateMediaMessage });
+    expect(await fetch.fetchByRef(ref())).toMatchObject({ ok: false, reason: 'expired' });
+  });
+
+  it('says expired when the link is still dead after the phone uploaded the file again', async () => {
+    const updateMediaMessage = jest.fn((m: WAMessage) => Promise.resolve(m));
+    const { fetch } = build(() => Promise.reject(boom(410)), { updateMediaMessage });
+    expect(await fetch.fetchByRef(ref())).toMatchObject({ ok: false, reason: 'expired' });
+  });
+
+  it('says phone-unavailable when the phone never answers the re-upload request', async () => {
+    const updateMediaMessage = jest.fn(() => new Promise<WAMessage>(() => undefined));
+    const { fetch } = build(() => Promise.reject(boom(404)), { updateMediaMessage });
+    expect(await fetch.fetchByRef(ref(), { timeoutMs: 30 })).toMatchObject({ ok: false, reason: 'phone-unavailable' });
   });
 
   it('refuses an address that a re-upload answer moved off WhatsApp', async () => {
@@ -122,17 +187,10 @@ describe('BaileysMediaFetch.fetchByRef', () => {
       message: { imageMessage: { url: 'https://evil.example/x', directPath: undefined } },
     } as unknown as WAMessage;
     const updateMediaMessage = jest.fn(() => Promise.resolve(moved));
-    const { fetch, downloadMediaMessage } = build(
-      async (...args: unknown[]) => {
-        const ctx = args[3] as { reuploadRequest: (m: WAMessage) => Promise<WAMessage> };
-        await ctx.reuploadRequest(args[0] as WAMessage);
-        return chunks('x');
-      },
-      { updateMediaMessage },
-    );
+    const { fetch, downloadMediaMessage } = build(() => Promise.reject(boom(404)), { updateMediaMessage });
     const out = await fetch.fetchByRef(ref());
-    expect(downloadMediaMessage).toHaveBeenCalled();
     expect(out).toMatchObject({ ok: false, reason: 'refused-host' });
+    expect(downloadMediaMessage).toHaveBeenCalledTimes(1);
   });
 
   it('does not fetch from an address that is not a WhatsApp media host', async () => {
@@ -167,16 +225,7 @@ describe('BaileysMediaFetch.fetchByRef', () => {
     expect(await fetch.fetchByRef(ref())).toMatchObject({ ok: false, reason: 'not-ready' });
   });
 
-  it('says expired when WhatsApp and the phone both no longer have the file', async () => {
-    const { fetch } = build(() =>
-      Promise.reject(
-        Object.assign(new Error('Media re-upload failed by device (NOT_FOUND)'), { output: { statusCode: 404 } }),
-      ),
-    );
-    expect(await fetch.fetchByRef(ref())).toMatchObject({ ok: false, reason: 'expired' });
-  });
-
-  it('says error for a failure that is not about the file being gone', async () => {
+  it('says error, with its message, for a failure that is not about the link', async () => {
     const { fetch } = build(() => Promise.reject(new Error('Invalid media key')));
     expect(await fetch.fetchByRef(ref())).toEqual({ ok: false, reason: 'error', detail: 'Invalid media key' });
   });

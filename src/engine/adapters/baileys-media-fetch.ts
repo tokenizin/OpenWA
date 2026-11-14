@@ -3,7 +3,6 @@ import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
 import type { MediaFetchFailure, MediaFetchOutcome } from '../interfaces/whatsapp-engine.interface';
 import type { MediaRef, MediaRefKind } from '../types/baileys.types';
 import { isWhatsAppMediaSource } from './baileys-events';
-import { createSilentLogger } from './baileys-logger';
 import { type createLogger } from '../../common/services/logger.service';
 
 /** Default per-file cap for a fetched attachment (the chat-media archive's own default). */
@@ -62,15 +61,55 @@ interface FailureShape {
   message?: unknown;
 }
 
-/**
- * Sort a failed fetch into what a caller can do about it. A 404/410 here has already been through the
- * re-upload request (Baileys retries those once), so it means the phone does not have the file either.
- */
-export function classifyFetchFailure(err: unknown): { reason: MediaFetchFailure; detail: string } {
+/** The HTTP status behind a failure: Baileys throws a Boom, which carries it in `output.statusCode`. */
+export function statusOf(err: unknown): number | undefined {
   const e = (err ?? {}) as FailureShape;
-  const detail = err instanceof Error ? err.message : typeof e.message === 'string' ? e.message : String(err);
-  const code = [e.status, e.output?.statusCode].find((v): v is number => typeof v === 'number');
-  if (code === 404 || code === 410) return { reason: 'expired', detail };
+  return [e.status, e.output?.statusCode].find((v): v is number => typeof v === 'number');
+}
+
+/**
+ * The statuses of a media link that has stopped working: gone (404, 410) or its signed address expired (403).
+ * Only then is the phone asked to upload the file again.
+ */
+const DEAD_LINK = new Set([403, 404, 410]);
+
+/** What a failure says, without the signed address in it (it is a credential and is long). */
+function describe(err: unknown): string {
+  const e = (err ?? {}) as FailureShape;
+  const text = err instanceof Error ? err.message : typeof e.message === 'string' ? e.message : String(err);
+  const bare = text.replace(/https?:\/\/\S+/g, u => {
+    try {
+      return new URL(u).host;
+    } catch {
+      return 'address';
+    }
+  });
+  const code = statusOf(err);
+  return code === undefined ? bare : `HTTP ${code}: ${bare}`;
+}
+
+/** Where a fetch was when it failed: the first download, the request to the phone, or the second download. */
+export type FetchStage = 'download' | 'reupload' | 'redownload';
+
+/**
+ * Sort a failed fetch into what a caller can do about it. The phone has been asked by the time a failure
+ * of the later stages is seen: a re-upload it answers "not found" to, or a link still dead after it, means
+ * the file is gone, and is final.
+ */
+export function classifyFetchFailure(
+  err: unknown,
+  stage: FetchStage = 'download',
+): { reason: MediaFetchFailure; detail: string } {
+  const code = statusOf(err);
+  const detail = describe(err);
+  if (stage === 'reupload') {
+    return code === 404
+      ? { reason: 'expired', detail: `the phone no longer has the file (${detail})` }
+      : { reason: 'error', detail: `re-upload request failed: ${detail}` };
+  }
+  if (stage === 'redownload' && code !== undefined && DEAD_LINK.has(code)) {
+    return { reason: 'expired', detail: `still unavailable after the phone uploaded it again (${detail})` };
+  }
   return { reason: 'error', detail };
 }
 
@@ -95,6 +134,7 @@ export class BaileysMediaFetch {
     }
 
     let timedOut = false;
+    let stage: FetchStage = 'download';
     let stream: { destroy?: () => void } | undefined;
     const work = async (): Promise<MediaFetchOutcome> => {
       const b = await this.host.loadLib();
@@ -106,12 +146,26 @@ export class BaileysMediaFetch {
       };
       guard(msg);
       const dispatcher = this.host.getFetchDispatcher();
-      const source = (await b.downloadMediaMessage(
-        msg,
-        'stream',
-        dispatcher ? { options: { dispatcher } as RequestInit } : {},
-        { logger: createSilentLogger(), reuploadRequest: async m => guard(await sock.updateMediaMessage(m)) },
-      )) as AsyncIterable<Buffer> & { destroy?: () => void };
+      // No re-upload hook is passed: Baileys only retries through it on an error carrying `.status`, and the
+      // error it throws carries the status in `output.statusCode`, so the retry never ran. It is done here.
+      const download = async (m: WAMessage) =>
+        (await b.downloadMediaMessage(
+          m,
+          'stream',
+          dispatcher ? { options: { dispatcher } as RequestInit } : {},
+        )) as AsyncIterable<Buffer> & { destroy?: () => void };
+      let source: AsyncIterable<Buffer> & { destroy?: () => void };
+      try {
+        source = await download(msg);
+      } catch (err) {
+        const code = statusOf(err);
+        if (code === undefined || !DEAD_LINK.has(code)) throw err;
+        // The link is dead: the phone, if it still has the file, uploads it again at a new address.
+        stage = 'reupload';
+        const refreshed = guard(await sock.updateMediaMessage(msg));
+        stage = 'redownload';
+        source = await download(refreshed);
+      }
       stream = source;
       const chunks: Buffer[] = [];
       let total = 0;
@@ -142,7 +196,7 @@ export class BaileysMediaFetch {
     });
     const run = work().catch((err: unknown): MediaFetchOutcome => {
       if (err instanceof RefusedHostError) return { ok: false, reason: 'refused-host', detail: err.message };
-      const failure = classifyFetchFailure(err);
+      const failure = classifyFetchFailure(err, stage);
       return { ok: false, ...failure };
     });
     try {
