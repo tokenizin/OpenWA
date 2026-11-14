@@ -27,6 +27,8 @@ import { createLogger } from '../../common/services/logger.service';
 
 /** Retries considered per pass: enough to find one that is due without reading the whole backlog. */
 const RETRY_CANDIDATES = 25;
+/** Empty reads of a chat's newest message before its history walk is given up. */
+const MAX_EMPTY_ANCHOR_READS = 5;
 
 export interface FetchTick {
   /** What this pass did with the one reference it picked; null when there was nothing to do. */
@@ -74,6 +76,8 @@ export class MediaRefFetcherService implements OnModuleInit, OnModuleDestroy {
   private warnedArchiveOff = false;
   private sessionCursor = 0;
   private readonly history = new Map<string, HistoryChatState>();
+  /** Passes in a row that found no message to start a chat's history walk from. */
+  private readonly emptyAnchorReads = new Map<string, number>();
 
   constructor(
     @InjectRepository(BaileysMediaRef, 'data') private readonly refs: Repository<BaileysMediaRef>,
@@ -267,11 +271,21 @@ export class MediaRefFetcherService implements OnModuleInit, OnModuleDestroy {
         }
         const anchor = state.anchor ?? (await this.newestAnchor(sessionId, chatId));
         if (!anchor) {
-          this.history.set(key, { ...state, done: true, doneReason: 'no message to start from' });
-          this.logger.log(`History for ${chatId}: nothing held to start from`);
-          done.push({ chatId, action: 'done' });
+          // One empty read is not evidence the chat has no messages (the read can race startup). Try again on
+          // a later pass; only a run of empty reads ends the walk.
+          const empty = (this.emptyAnchorReads.get(key) ?? 0) + 1;
+          this.emptyAnchorReads.set(key, empty);
+          if (empty >= MAX_EMPTY_ANCHOR_READS) {
+            this.history.set(key, { ...state, done: true, doneReason: 'no message to start from' });
+            this.logger.log(`History for ${chatId}: no message to start from after ${empty} reads; stopped`);
+            done.push({ chatId, action: 'done' });
+          } else {
+            if (empty === 1) this.logger.warn(`History for ${chatId}: no message found to start from; will read again`);
+            done.push({ chatId, action: 'no-anchor' });
+          }
           continue;
         }
+        this.emptyAnchorReads.delete(key);
         let answer: HistoryAnswer;
         try {
           answer = await engine.requestOlderHistory(chatId, anchor, s.historyPageSize, { waitMs: s.historyWaitMs });

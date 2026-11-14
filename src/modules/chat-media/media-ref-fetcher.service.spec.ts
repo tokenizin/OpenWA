@@ -420,11 +420,29 @@ describe('MediaRefFetcherService', () => {
       expect(requestOlderHistory).toHaveBeenCalledTimes(1);
     });
 
-    it('does not ask for a chat with no messages to start from', async () => {
+    it('does not ask for a chat with no messages to start from, and does not give up after one empty read', async () => {
       const { svc, engine } = withHistory();
       quiet(svc);
-      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'done' }]);
+      jest
+        .spyOn((svc as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'no-anchor' }]);
       expect(engine.requestOlderHistory).not.toHaveBeenCalled();
+    });
+
+    it('gives up only after several empty reads in a row, and a message found in between resets the count', async () => {
+      const { svc, engine } = withHistory(
+        {},
+        jest.fn(() => answered(0, null)),
+      );
+      quiet(svc);
+      jest
+        .spyOn((svc as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      for (let i = 0; i < 4; i++) expect((await svc.historyTick())[0].action).toBe('no-anchor');
+      await addRow('LATE', { timestamp: 500 });
+      expect((await svc.historyTick())[0].action).toBe('done');
+      expect(engine.requestOlderHistory).toHaveBeenCalledTimes(1);
     });
   });
 });
