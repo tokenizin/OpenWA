@@ -1,15 +1,20 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { BaileysMediaRef } from '../../engine/adapters/baileys-media-ref.entity';
 import { EngineRegistry } from '../../engine/engine-registry.service';
-import { EngineStatus, type IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
+import {
+  EngineStatus,
+  type HistoryAnchor,
+  type HistoryAnswer,
+  type IWhatsAppEngine,
+} from '../../engine/interfaces/whatsapp-engine.interface';
 import type { MediaRef } from '../../engine/types/baileys.types';
 import { Message, MessageDirection } from '../message/entities/message.entity';
 import { ChatMediaArchiveService, DEFAULT_ARCHIVE_MAX_BYTES } from './chat-media-archive.service';
 import {
-  decideHistory,
+  afterHistoryAnswer,
   isDue,
   newHistoryState,
   parseChatList,
@@ -53,9 +58,11 @@ export interface FetchSettings {
  *     again, and the file is stored through the chat-media archive and pointed at by the message row,
  *     which is what the per-message media route serves. The outcome is written back to the reference,
  *     so what has worked, what has expired and what is waiting can be read from `baileys_media_refs`.
- *   - history: per listed chat, one request for older messages when the previous answer is in. The
- *     answers come back through the history sync, which persists them and keeps their references for
- *     the loop above.
+ *   - history: per listed chat, one request for older messages per pass, waiting for the phone's answer.
+ *     The walk starts at the newest message held, so the first answers re-deliver messages the gateway
+ *     already stores, which is how the references it dropped at the first sync are recovered, then goes
+ *     on past the oldest one. The answers come back through the history sync, which stores them and keeps
+ *     their references for the loop above.
  *
  * The rate is one file per `intervalMs` and one history request per `historyIntervalMs`, deliberately
  * low: both ask WhatsApp for things a person's own app would not ask for in bulk.
@@ -224,17 +231,28 @@ export class MediaRefFetcherService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The oldest message held for a chat, as the anchor older history is requested from. */
-  private async oldestMessage(sessionId: string, chatId: string) {
-    return this.messages.findOne({
-      where: { sessionId, chatId: In([chatId]) },
-      order: { timestamp: 'ASC', id: 'ASC' },
+  /** The newest message held for a chat that can anchor a request: the walk back starts there. */
+  private async newestAnchor(sessionId: string, chatId: string): Promise<HistoryAnchor | null> {
+    const row = await this.messages.findOne({
+      where: { sessionId, chatId: In([chatId]), waMessageId: Not(IsNull()) },
+      order: { timestamp: 'DESC', id: 'DESC' },
       select: { id: true, waMessageId: true, direction: true, timestamp: true, author: true },
     });
+    if (!row?.waMessageId) return null;
+    return {
+      id: row.waMessageId,
+      fromMe: row.direction === MessageDirection.OUTGOING,
+      timestamp: row.timestamp,
+      ...(row.author && chatId.endsWith('@g.us') ? { participant: row.author } : {}),
+    };
   }
 
-  /** One pass over the listed chats: ask for older history wherever the previous answer is in. */
-  async historyTick(now = Date.now()): Promise<Array<{ chatId: string; action: string }>> {
+  /**
+   * One request for older history, for the next listed chat that is not finished. A pass waits for the
+   * phone's answer (the answer's messages are stored, with their attachment references, before it comes
+   * back), so there is never more than one request open and the pass is the rate limit.
+   */
+  async historyTick(): Promise<Array<{ chatId: string; action: string }>> {
     const s = this.settings;
     const done: Array<{ chatId: string; action: string }> = [];
     if (!s.enabled || !s.historyEnabled || s.chats.length === 0) return done;
@@ -242,45 +260,38 @@ export class MediaRefFetcherService implements OnModuleInit, OnModuleDestroy {
       if (typeof engine.requestOlderHistory !== 'function' || engine.getStatus() !== EngineStatus.READY) continue;
       for (const chatId of s.chats) {
         const key = `${sessionId}\u0000${chatId}`;
-        const oldest = await this.oldestMessage(sessionId, chatId);
-        const decision = decideHistory(this.history.get(key) ?? newHistoryState(), oldest?.waMessageId ?? null, now, {
-          waitMs: s.historyWaitMs,
-          maxPages: s.historyMaxPages,
-          maxMisses: 2,
-        });
-        this.history.set(key, decision.state);
-        if (decision.action === 'done') {
-          this.logger.log(
-            `History for ${chatId}: stopped (${decision.state.doneReason}); ${decision.state.pages} pages in`,
-          );
-        }
-        if (decision.action !== 'request' || !oldest) {
-          done.push({ chatId, action: decision.action });
+        const state = this.history.get(key) ?? newHistoryState();
+        if (state.done) {
+          done.push({ chatId, action: 'skip' });
           continue;
         }
+        const anchor = state.anchor ?? (await this.newestAnchor(sessionId, chatId));
+        if (!anchor) {
+          this.history.set(key, { ...state, done: true, doneReason: 'no message to start from' });
+          this.logger.log(`History for ${chatId}: nothing held to start from`);
+          done.push({ chatId, action: 'done' });
+          continue;
+        }
+        let answer: HistoryAnswer;
         try {
-          await engine.requestOlderHistory(
-            chatId,
-            {
-              id: oldest.waMessageId,
-              fromMe: oldest.direction === MessageDirection.OUTGOING,
-              timestamp: oldest.timestamp,
-              ...(oldest.author && chatId.endsWith('@g.us') ? { participant: oldest.author } : {}),
-            },
-            s.historyPageSize,
-          );
-          this.logger.log(
-            `History for ${chatId}: asked for ${s.historyPageSize} messages older than ${oldest.waMessageId}`,
-          );
-          done.push({ chatId, action: 'request' });
-          // One request per pass: the pass is the rate limit.
-          return done;
+          answer = await engine.requestOlderHistory(chatId, anchor, s.historyPageSize, { waitMs: s.historyWaitMs });
         } catch (err) {
-          // Not sent: leave the walk where it was so the next pass asks again.
-          this.history.set(key, { ...decision.state, waitingSince: null });
+          // Not sent: the walk stays where it was and the next pass asks again.
           this.logger.warn(`History request for ${chatId} failed: ${err instanceof Error ? err.message : String(err)}`);
           done.push({ chatId, action: 'failed' });
+          continue;
         }
+        const next = afterHistoryAnswer(state, anchor, answer, { maxPages: s.historyMaxPages, maxMisses: 2 });
+        this.history.set(key, next);
+        this.logger.log(
+          `History for ${chatId}: ${
+            answer.answered
+              ? `${answer.messages} messages older than ${anchor.id}`
+              : `no answer for the request from ${anchor.id}`
+          }${next.done ? `; stopped (${next.doneReason})` : ''} [page ${next.pages}]`,
+        );
+        done.push({ chatId, action: next.done ? 'done' : answer.answered ? 'answered' : 'unanswered' });
+        return done;
       }
     }
     return done;

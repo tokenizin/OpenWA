@@ -1,5 +1,6 @@
+import type { HistoryAnchor } from '../../engine/interfaces/whatsapp-engine.interface';
 import {
-  decideHistory,
+  afterHistoryAnswer,
   isDue,
   newHistoryState,
   parseChatList,
@@ -94,56 +95,42 @@ describe('parseChatList', () => {
   });
 });
 
-describe('decideHistory', () => {
-  const limits: HistoryLimits = { waitMs: 1000, maxPages: 3, maxMisses: 2 };
+describe('afterHistoryAnswer', () => {
+  const limits: HistoryLimits = { maxPages: 3, maxMisses: 2 };
+  const at = (id: string, timestamp = 100): HistoryAnchor => ({ id, fromMe: false, timestamp });
+  const answer = (messages: number, oldest: HistoryAnchor | null, answered = true) => ({ answered, messages, oldest });
 
-  it('asks first, from the oldest message held', () => {
-    const d = decideHistory(newHistoryState(), 'A', 0, limits);
-    expect(d.action).toBe('request');
-    expect(d.state).toMatchObject({ waitingSince: 0, anchorId: 'A' });
+  it('moves the anchor to the oldest message of the answer', () => {
+    const s = afterHistoryAnswer(newHistoryState(), at('NEWEST'), answer(50, at('B', 50)), limits);
+    expect(s).toMatchObject({ anchor: { id: 'B' }, pages: 1, misses: 0, done: false });
   });
 
-  it('has nothing to ask from when the chat holds no message', () => {
-    expect(decideHistory(newHistoryState(), null, 0, limits)).toMatchObject({ action: 'done', state: { done: true } });
+  it('ends when the answer holds nothing older', () => {
+    const s = afterHistoryAnswer(newHistoryState(), at('A'), answer(0, null), limits);
+    expect(s).toMatchObject({ done: true, doneReason: 'no older messages' });
   });
 
-  it('waits while the answer is expected and the oldest message has not changed', () => {
-    const open = decideHistory(newHistoryState(), 'A', 0, limits).state;
-    expect(decideHistory(open, 'A', 999, limits).action).toBe('wait');
+  it('ends when the answer does not go any further back than where it started', () => {
+    const s = afterHistoryAnswer(newHistoryState(), at('A'), answer(1, at('A')), limits);
+    expect(s).toMatchObject({ done: true, doneReason: 'the answer did not go any further back' });
   });
 
-  it('counts an answer when the oldest message changes, then asks again from the new one', () => {
-    const open = decideHistory(newHistoryState(), 'A', 0, limits).state;
-    const d = decideHistory(open, 'B', 100, limits);
-    expect(d.action).toBe('request');
-    expect(d.state).toMatchObject({ pages: 1, misses: 0, anchorId: 'B', waitingSince: 100 });
+  it('asks again from the same place when the phone did not answer, and stops after a few in a row', () => {
+    const first = afterHistoryAnswer(newHistoryState(), at('A'), answer(0, null, false), limits);
+    expect(first).toMatchObject({ done: false, misses: 1, anchor: { id: 'A' } });
+    const second = afterHistoryAnswer(first, at('A'), answer(0, null, false), limits);
+    expect(second).toMatchObject({ done: true });
+    expect(second.doneReason).toContain('did not answer');
   });
 
-  it('counts a miss when nothing came in time, asks once more, and then stops', () => {
-    let s = decideHistory(newHistoryState(), 'A', 0, limits).state;
-    let d = decideHistory(s, 'A', 1000, limits);
-    expect(d.action).toBe('request');
-    expect(d.state.misses).toBe(1);
-    s = d.state;
-    d = decideHistory(s, 'A', 2000, limits);
-    expect(d).toMatchObject({ action: 'done', state: { done: true, doneReason: 'no older messages arrived' } });
+  it('an answer clears the count of misses', () => {
+    const missed = afterHistoryAnswer(newHistoryState(), at('A'), answer(0, null, false), limits);
+    expect(afterHistoryAnswer(missed, at('A'), answer(5, at('B')), limits).misses).toBe(0);
   });
 
-  it('stops after the page limit', () => {
+  it('stops at the page limit', () => {
     let s = newHistoryState();
-    let now = 0;
-    const ids = ['A', 'B', 'C', 'D'];
-    let d = decideHistory(s, ids[0], now, limits);
-    for (let i = 1; i < ids.length; i++) {
-      now += 100;
-      s = d.state;
-      d = decideHistory(s, ids[i], now, limits);
-    }
-    expect(d).toMatchObject({ action: 'done', state: { pages: 3, doneReason: 'reached 3 pages' } });
-  });
-
-  it('does nothing once done', () => {
-    const done = decideHistory(newHistoryState(), null, 0, limits).state;
-    expect(decideHistory(done, 'A', 5, limits).action).toBe('skip');
+    for (const id of ['B', 'C', 'D']) s = afterHistoryAnswer(s, s.anchor ?? at('A'), answer(5, at(id)), limits);
+    expect(s).toMatchObject({ done: true, pages: 3, doneReason: 'reached 3 pages' });
   });
 });

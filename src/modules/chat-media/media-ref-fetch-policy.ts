@@ -1,4 +1,8 @@
-import type { MediaFetchOutcome } from '../../engine/interfaces/whatsapp-engine.interface';
+import type {
+  HistoryAnchor,
+  HistoryAnswer,
+  MediaFetchOutcome,
+} from '../../engine/interfaces/whatsapp-engine.interface';
 
 /**
  * The decisions of the background media fetcher, kept free of I/O and of the clock so they can be tested
@@ -100,71 +104,58 @@ export function parseChatList(raw: string | undefined): string[] {
 // ─── Asking the phone for older history, one chat at a time ───────────────────────────────────────
 
 export interface HistoryChatState {
-  /** Requests answered with older messages so far. */
+  /** Where the next request starts: the message the previous answer's oldest one was. Null before the first. */
+  anchor: HistoryAnchor | null;
+  /** Requests answered with messages so far. */
   pages: number;
-  /** Requests that brought nothing new (the phone is off, or there is nothing older). */
+  /** Requests in a row the phone did not answer. */
   misses: number;
-  /** When the open request was sent (ms), and the oldest message id at that moment. Null when none is open. */
-  waitingSince: number | null;
-  anchorId: string | null;
   done: boolean;
   doneReason: string | null;
 }
 
 export const newHistoryState = (): HistoryChatState => ({
+  anchor: null,
   pages: 0,
   misses: 0,
-  waitingSince: null,
-  anchorId: null,
   done: false,
   doneReason: null,
 });
 
 export interface HistoryLimits {
-  waitMs: number;
   maxPages: number;
+  /** Unanswered requests in a row that end the walk (the phone is off, or does not serve this chat). */
   maxMisses: number;
 }
 
-export type HistoryDecision =
-  | { action: 'request'; state: HistoryChatState }
-  | { action: 'wait' | 'skip'; state: HistoryChatState }
-  | { action: 'done'; state: HistoryChatState };
-
 /**
- * What to do for one chat now. `oldestId` is the oldest message held for it. The history arrives later
- * and unannounced, so progress is told by the oldest message changing: while it has not, the open
- * request is waited on for `waitMs`; after that it counts as a miss, and a few misses in a row end the
- * walk. The walk also ends at `maxPages`, so one chat cannot ask forever.
+ * Where the walk stands after one request. It starts at the newest message held, so the first answers
+ * re-deliver messages already stored (their attachment references are what is wanted, and an answer is
+ * kept even for a message that is already a row), and carries on past the oldest one held into history
+ * the gateway never had. Each answer's oldest message is the next anchor. It ends on an answer with no
+ * messages (nothing older), on a few requests in a row left unanswered, on an answer that does not move
+ * (the same anchor again), or at the page limit, so one chat cannot ask forever.
  */
-export function decideHistory(
+export function afterHistoryAnswer(
   prev: HistoryChatState,
-  oldestId: string | null,
-  nowMs: number,
+  sentFrom: HistoryAnchor,
+  answer: Pick<HistoryAnswer, 'answered' | 'messages' | 'oldest'>,
   limits: HistoryLimits,
-): HistoryDecision {
-  if (prev.done) return { action: 'skip', state: prev };
-  const finish = (reason: string): HistoryDecision => ({
-    action: 'done',
-    state: { ...prev, waitingSince: null, done: true, doneReason: reason },
+): HistoryChatState {
+  const stop = (state: HistoryChatState, reason: string): HistoryChatState => ({
+    ...state,
+    done: true,
+    doneReason: reason,
   });
-  if (!oldestId) return finish('no message to start from');
-
-  let state = prev;
-  if (state.waitingSince !== null) {
-    if (oldestId !== state.anchorId) {
-      state = { ...state, pages: state.pages + 1, misses: 0, waitingSince: null };
-    } else if (nowMs - state.waitingSince < limits.waitMs) {
-      return { action: 'wait', state };
-    } else {
-      state = { ...state, misses: state.misses + 1, waitingSince: null };
-      if (state.misses >= limits.maxMisses) {
-        return { action: 'done', state: { ...state, done: true, doneReason: 'no older messages arrived' } };
-      }
-    }
+  if (!answer.answered) {
+    const misses = prev.misses + 1;
+    const next = { ...prev, anchor: sentFrom, misses };
+    return misses >= limits.maxMisses ? stop(next, 'the phone did not answer (off or offline?)') : next;
   }
-  if (state.pages >= limits.maxPages) {
-    return { action: 'done', state: { ...state, done: true, doneReason: `reached ${limits.maxPages} pages` } };
-  }
-  return { action: 'request', state: { ...state, waitingSince: nowMs, anchorId: oldestId } };
+  if (answer.messages === 0 || !answer.oldest)
+    return stop({ ...prev, anchor: sentFrom, misses: 0 }, 'no older messages');
+  const next: HistoryChatState = { ...prev, anchor: answer.oldest, pages: prev.pages + 1, misses: 0 };
+  if (answer.oldest.id === sentFrom.id) return stop(next, 'the answer did not go any further back');
+  if (next.pages >= limits.maxPages) return stop(next, `reached ${limits.maxPages} pages`);
+  return next;
 }

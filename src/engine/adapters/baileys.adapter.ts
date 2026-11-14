@@ -51,6 +51,7 @@ import {
   StatusPostOptions,
   StoredChatMessageLookup,
   HistoryAnchor,
+  HistoryAnswer,
   MediaFetchOutcome,
 } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
@@ -264,7 +265,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
       handleCallEvents: calls => this.events.handleCallEvents(calls),
       handlePresenceUpdate: update => this.events.handlePresenceUpdate(update),
       fenceStoredWrites: () => this.events.fenceStoredWrites(),
-      captureHistoryMessages: messages => this.history.captureHistoryMessages(messages),
+      captureHistoryMessages: (messages, requestId) => this.history.captureHistoryMessages(messages, requestId),
       hydrateNames: () => this.history.hydrateNames(),
       restoreAddressbookSnapshot: () => this.history.restoreAddressbookSnapshot(),
       getOnQRCode: () => this.callbacks.onQRCode,
@@ -298,20 +299,24 @@ export class BaileysAdapter implements IWhatsAppEngine {
   }
 
   disconnect(): Promise<void> {
+    this.history.close();
     return this.lifecycle.disconnect();
   }
 
   async logout(): Promise<void> {
+    this.history.close();
     return this.lifecycle.logout();
   }
 
   destroy(): Promise<void> {
+    this.history.close();
     return this.lifecycle.destroy();
   }
 
   // Baileys has no separate Chromium process to SIGKILL (destroy() already ends the socket
   // synchronously), so a force-destroy is just a destroy.
   forceDestroy(): Promise<void> {
+    this.history.close();
     return this.lifecycle.forceDestroy();
   }
 
@@ -644,9 +649,14 @@ export class BaileysAdapter implements IWhatsAppEngine {
     return this.mediaFetch.fetchByRef(ref, opts);
   }
 
-  requestOlderHistory(chatId: string, anchor: HistoryAnchor, count: number): Promise<string> {
+  requestOlderHistory(
+    chatId: string,
+    anchor: HistoryAnchor,
+    count: number,
+    opts?: { waitMs?: number },
+  ): Promise<HistoryAnswer> {
     this.ensureReady();
-    return this.mediaFetch.requestOlder(chatId, anchor, count);
+    return this.history.requestOlder(chatId, anchor, count, opts?.waitMs ?? 120_000);
   }
 
   // ----- Gated: unsupported on Baileys (reasons inline) -----

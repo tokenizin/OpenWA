@@ -1,7 +1,13 @@
 import { parseWaId } from '../identity/wa-id';
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { Chat, Contact as BaileysContact, WAMessage, WAMessageKey, WASocket } from '@whiskeysockets/baileys';
-import { EngineEventCallbacks, IncomingMessage, MessageType } from '../interfaces/whatsapp-engine.interface';
+import {
+  EngineEventCallbacks,
+  HistoryAnchor,
+  HistoryAnswer,
+  IncomingMessage,
+  MessageType,
+} from '../interfaces/whatsapp-engine.interface';
 import {
   BAILEYS_NON_CONTENT_TYPES,
   buildIncomingMessageFromBaileys,
@@ -16,6 +22,7 @@ import {
 } from './baileys-message-mapper';
 import { BAILEYS_QUERY_BUDGET_MS, withQueryDeadline } from './baileys-query-deadline';
 import { extractMediaRef } from './baileys-media-ref';
+import { BaileysHistoryRequests } from './baileys-history-requests';
 import type { MediaRef } from '../types/baileys.types';
 import { type createLogger } from '../../common/services/logger.service';
 
@@ -58,6 +65,8 @@ export interface BaileysHistoryHost {
   /** The currently-registered onHistoryMessages callback, if any (assigned at initialize()). */
   getOnHistoryMessages(): EngineEventCallbacks['onHistoryMessages'];
   getStoredWriteGeneration?(): number;
+  /** The id a chat is filed under in the engine's own dialect (what a request to the phone names it by). */
+  chatJid(chatId: string): string;
   /**
    * Keep the attachment references a history sync delivered, so the files can be fetched later. The sync carries a key and
    * a path for each attachment and never the file. Optional: absent means references are not kept.
@@ -134,6 +143,7 @@ function revokeFallbackKey(
 export class BaileysHistory {
   private static readonly TRACKED_LID_MESSAGES_LIMIT = 2_000;
   private readonly lidByMessageId = new Map<string, { chatId: string; fromMe: boolean }>();
+  private readonly requests = new BaileysHistoryRequests();
 
   constructor(private readonly host: BaileysHistoryHost) {}
 
@@ -166,7 +176,55 @@ export class BaileysHistory {
    * `onHistoryMessages` callback, harvesting `pushName` into contacts on the way (history `contacts`
    * carry no names) and seeding each chat's last-message preview.
    */
-  async captureHistoryMessages(messages: WAMessage[]): Promise<void> {
+  async captureHistoryMessages(messages: WAMessage[], requestId?: string | null): Promise<void> {
+    try {
+      await this.captureBatch(messages);
+    } finally {
+      // After the batch is stored, so a caller waiting on a request finds its references kept.
+      this.requests.noteBatch(
+        requestId,
+        messages.flatMap(m => this.anchorOf(m)),
+      );
+    }
+  }
+
+  /** Where the walk back through a chat's history goes next: the message as an anchor, or none without an id. */
+  private anchorOf(msg: WAMessage): HistoryAnchor[] {
+    if (!msg.key?.id) return [];
+    const timestamp = toUnixSeconds(msg.messageTimestamp);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return [];
+    return [
+      {
+        id: msg.key.id,
+        fromMe: msg.key.fromMe === true,
+        timestamp,
+        ...(msg.key.participant ? { participant: msg.key.participant } : {}),
+      },
+    ];
+  }
+
+  /** Ask the phone for messages older than `anchor` and wait for the answer (see BaileysHistoryRequests). */
+  requestOlder(chatId: string, anchor: HistoryAnchor, count: number, waitMs: number): Promise<HistoryAnswer> {
+    return this.requests.request(() => {
+      const jid = this.host.chatJid(chatId);
+      return this.sock().fetchMessageHistory(
+        count,
+        {
+          remoteJid: jid,
+          id: anchor.id,
+          fromMe: anchor.fromMe,
+          ...(anchor.participant ? { participant: anchor.participant } : {}),
+        },
+        anchor.timestamp,
+      );
+    }, waitMs);
+  }
+
+  close(): void {
+    this.requests.close();
+  }
+
+  private async captureBatch(messages: WAMessage[]): Promise<void> {
     if (!messages.length) {
       return;
     }

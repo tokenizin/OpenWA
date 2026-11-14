@@ -1,6 +1,6 @@
 import type * as BaileysLib from '@whiskeysockets/baileys';
 import type { WAMessage, WASocket } from '@whiskeysockets/baileys';
-import type { HistoryAnchor, MediaFetchFailure, MediaFetchOutcome } from '../interfaces/whatsapp-engine.interface';
+import type { MediaFetchFailure, MediaFetchOutcome } from '../interfaces/whatsapp-engine.interface';
 import type { MediaRef, MediaRefKind } from '../types/baileys.types';
 import { isWhatsAppMediaSource } from './baileys-events';
 import { createSilentLogger } from './baileys-logger';
@@ -75,8 +75,8 @@ export function classifyFetchFailure(err: unknown): { reason: MediaFetchFailure;
 }
 
 /**
- * Fetches attachments from the references a history sync kept, and asks the phone for older history.
- * Rate and order are the caller's business; this does one thing per call.
+ * Fetches attachments from the references a history sync kept. Rate and order are the caller's business;
+ * this does one thing per call.
  */
 export class BaileysMediaFetch {
   constructor(private readonly host: BaileysMediaFetchHost) {}
@@ -150,24 +150,6 @@ export class BaileysMediaFetch {
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  /**
-   * Ask the phone for up to `count` messages older than the anchor. Baileys answers with a request id and
-   * the messages arrive later through the history sync event.
-   */
-  async requestOlder(chatId: string, anchor: HistoryAnchor, count: number): Promise<string> {
-    const sock = this.host.getSocket();
-    return sock.fetchMessageHistory(
-      count,
-      {
-        remoteJid: this.host.chatJid(chatId),
-        id: anchor.id,
-        fromMe: anchor.fromMe,
-        ...(anchor.participant ? { participant: anchor.participant } : {}),
-      },
-      anchor.timestamp,
-    );
   }
 }
 

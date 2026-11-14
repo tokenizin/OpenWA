@@ -201,29 +201,3 @@ describe('BaileysMediaFetch.fetchByRef', () => {
     expect(destroy).toHaveBeenCalled();
   });
 });
-
-describe('BaileysMediaFetch.requestOlder', () => {
-  it('asks the phone for older messages, keyed by the engine form of the chat', async () => {
-    const fetchMessageHistory = jest.fn(() => Promise.resolve('token-1'));
-    const { fetch } = build(() => chunks(''), { fetchMessageHistory });
-    expect(await fetch.requestOlder('628111@c.us', { id: 'OLD1', fromMe: true, timestamp: 1_700_000_000 }, 50)).toBe(
-      'token-1',
-    );
-    expect(fetchMessageHistory).toHaveBeenCalledWith(
-      50,
-      { remoteJid: '628111@s.whatsapp.net', id: 'OLD1', fromMe: true },
-      1_700_000_000,
-    );
-  });
-
-  it('names the sender for a group message', async () => {
-    const fetchMessageHistory = jest.fn(() => Promise.resolve('t'));
-    const { fetch } = build(() => chunks(''), { fetchMessageHistory });
-    await fetch.requestOlder('g@g.us', { id: 'O', fromMe: false, timestamp: 1, participant: 'p@s.whatsapp.net' }, 10);
-    expect(fetchMessageHistory).toHaveBeenCalledWith(
-      10,
-      expect.objectContaining({ participant: 'p@s.whatsapp.net' }),
-      1,
-    );
-  });
-});

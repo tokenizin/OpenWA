@@ -1705,8 +1705,9 @@ reference per `MEDIA_REF_FETCH_INTERVAL_MS`, downloads the file from WhatsApp, o
 it again when WhatsApp no longer holds it, and stores it as an archived file that this route then
 serves. A reference's `status` records the result: `done`, `expired` (WhatsApp no longer holds the
 file and the phone could not supply it), `failed`, or `pending`. With `MEDIA_REF_HISTORY_ENABLED=true`
-the gateway also asks the phone for older messages in the chats named in `MEDIA_REF_FETCH_CHATS`, which
-brings more references in. WhatsApp keeps media for a limited time, and a re-upload needs the phone
+the gateway also walks back through the history of the chats named in `MEDIA_REF_FETCH_CHATS`, asking the
+phone for older messages one request at a time from the newest message it holds; each answer is stored like
+a first link's history, which brings in the references the first sync dropped. WhatsApp keeps media for a limited time, and a re-upload needs the phone
 online, so not every old attachment can be recovered.
 
 The inline fallback also keeps an inbound message's media downloadable after

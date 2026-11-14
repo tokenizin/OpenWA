@@ -37,6 +37,16 @@ export interface HistoryAnchor {
   participant?: string;
 }
 
+/** The phone's answer to a request for older history. */
+export interface HistoryAnswer {
+  requestId: string;
+  /** False when nothing arrived in time: the phone is off or offline, or the request was not served. */
+  answered: boolean;
+  messages: number;
+  /** The oldest message of the answer; null when it held none. */
+  oldest: HistoryAnchor | null;
+}
+
 export type MediaFetchFailure =
   /** WhatsApp no longer holds the file and the phone could not or would not upload it again. Final. */
   | 'expired'
@@ -1283,11 +1293,18 @@ export interface SessionLifecycleCapability {
   fetchMediaByRef?(ref: MediaRef, opts?: { maxBytes?: number; timeoutMs?: number }): Promise<MediaFetchOutcome>;
 
   /**
-   * Ask the phone for the messages older than `anchor` in one chat. The answer is not returned: the
-   * messages arrive later through the history sync, the same way a first link delivers them. Resolves
-   * with WhatsApp's request id once the request is sent. Optional, Baileys only.
+   * Ask the phone for up to `count` messages older than `anchor` in one chat, and wait (up to `waitMs`)
+   * for the answer. The messages themselves arrive through the history sync, the same way a first link
+   * delivers them, and are stored there (their attachment references too); what comes back here says
+   * whether the phone answered, how many messages it sent and which was the oldest, the anchor for the
+   * next request. Optional, Baileys only.
    */
-  requestOlderHistory?(chatId: string, anchor: HistoryAnchor, count: number): Promise<string>;
+  requestOlderHistory?(
+    chatId: string,
+    anchor: HistoryAnchor,
+    count: number,
+    opts?: { waitMs?: number },
+  ): Promise<HistoryAnswer>;
 
   getQRCode(): string | null;
 

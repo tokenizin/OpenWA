@@ -320,10 +320,17 @@ describe('MediaRefFetcherService', () => {
   });
 
   describe('historyTick', () => {
+    const anchorOf = (id: string, timestamp: number, fromMe = false) => ({ id, fromMe, timestamp });
+    const answered = (messages: number, oldest: ReturnType<typeof anchorOf> | null) =>
+      Promise.resolve({ requestId: 'r', answered: true, messages, oldest });
     const withHistory = (
       over: Record<string, unknown> = {},
-      requestOlderHistory: jest.Mock = jest.fn(() => Promise.resolve('tok')),
+      requestOlderHistory: jest.Mock = jest.fn(() => answered(0, null)),
     ) => build({ settings: { historyEnabled: true, chats: CHAT, ...over }, engine: { requestOlderHistory } });
+    const quiet = (svc: MediaRefFetcherService) =>
+      jest
+        .spyOn((svc as unknown as { logger: { log: (m: string) => void } }).logger, 'log')
+        .mockImplementation(() => undefined);
 
     it('does nothing while off, or with no chats listed', async () => {
       const off = build({ settings: { chats: CHAT }, engine: { requestOlderHistory: jest.fn() } });
@@ -333,56 +340,90 @@ describe('MediaRefFetcherService', () => {
       expect(await none.svc.historyTick()).toEqual([]);
     });
 
-    it('asks for older messages from the oldest one held, saying who sent it', async () => {
+    it('starts at the newest message held, saying who sent it, and waits for the answer', async () => {
       const { svc, engine } = withHistory();
-      await addRow('NEWER', { timestamp: 2_000 });
-      await addRow('OLDEST', { timestamp: 500, direction: MessageDirection.OUTGOING });
-      expect(await svc.historyTick(0)).toEqual([{ chatId: CHAT, action: 'request' }]);
-      expect(engine.requestOlderHistory).toHaveBeenCalledWith(CHAT, { id: 'OLDEST', fromMe: true, timestamp: 500 }, 50);
+      quiet(svc);
+      await addRow('OLD', { timestamp: 500 });
+      await addRow('NEWEST', { timestamp: 2_000, direction: MessageDirection.OUTGOING });
+      await svc.historyTick();
+      expect(engine.requestOlderHistory).toHaveBeenCalledWith(
+        CHAT,
+        { id: 'NEWEST', fromMe: true, timestamp: 2_000 },
+        50,
+        { waitMs: 1_000 },
+      );
     });
 
-    it('waits for the answer, then asks again from the new oldest message', async () => {
-      const { svc, engine } = withHistory();
-      await addRow('A', { timestamp: 500 });
-      await svc.historyTick(0);
-      expect(await svc.historyTick(500)).toEqual([{ chatId: CHAT, action: 'wait' }]);
-      await addRow('B', { timestamp: 100 });
-      expect(await svc.historyTick(600)).toEqual([{ chatId: CHAT, action: 'request' }]);
-      expect(firstCall(engine.requestOlderHistory!, 1)[1]).toMatchObject({ id: 'B', timestamp: 100 });
+    it('carries on from the oldest message of each answer, which may already be held', async () => {
+      const requestOlderHistory = jest
+        .fn()
+        .mockImplementationOnce(() => answered(50, anchorOf('MID', 1_000)))
+        .mockImplementationOnce(() => answered(50, anchorOf('FAR', 100)))
+        .mockImplementation(() => answered(0, null));
+      const { svc } = withHistory({}, requestOlderHistory);
+      quiet(svc);
+      await addRow('NEWEST', { timestamp: 2_000 });
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'answered' }]);
+      await svc.historyTick();
+      await svc.historyTick();
+      expect(requestOlderHistory.mock.calls.map(c => (c as unknown[][])[1])).toEqual([
+        expect.objectContaining({ id: 'NEWEST' }),
+        expect.objectContaining({ id: 'MID' }),
+        expect.objectContaining({ id: 'FAR' }),
+      ]);
     });
 
-    it('stops for a chat when nothing older arrives', async () => {
+    it('stops for a chat on an answer with nothing older, and asks no more', async () => {
       const { svc, engine } = withHistory();
+      quiet(svc);
       await addRow('A', { timestamp: 500 });
-      await svc.historyTick(0);
-      await svc.historyTick(1_000); // first miss: asks once more
-      await svc.historyTick(2_000); // second miss: done
-      expect(await svc.historyTick(3_000)).toEqual([{ chatId: CHAT, action: 'skip' }]);
-      expect(engine.requestOlderHistory).toHaveBeenCalledTimes(2);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'done' }]);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'skip' }]);
+      expect(engine.requestOlderHistory).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks again from the same message when the phone did not answer, then gives up', async () => {
+      const requestOlderHistory = jest.fn(() =>
+        Promise.resolve({ requestId: 'r', answered: false, messages: 0, oldest: null }),
+      );
+      const { svc } = withHistory({}, requestOlderHistory);
+      quiet(svc);
+      await addRow('A', { timestamp: 500 });
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'unanswered' }]);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'done' }]);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'skip' }]);
+      expect(requestOlderHistory).toHaveBeenCalledTimes(2);
     });
 
     it('leaves the walk in place and tries again when the request could not be sent', async () => {
-      const requestOlderHistory = jest.fn().mockRejectedValueOnce(new Error('not connected')).mockResolvedValue('tok');
+      const requestOlderHistory = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('not connected'))
+        .mockImplementation(() => answered(5, anchorOf('B', 1)));
       const { svc } = withHistory({}, requestOlderHistory);
+      quiet(svc);
       jest
         .spyOn((svc as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn')
         .mockImplementation(() => undefined);
       await addRow('A', { timestamp: 500 });
-      expect(await svc.historyTick(0)).toEqual([{ chatId: CHAT, action: 'failed' }]);
-      expect(await svc.historyTick(10)).toEqual([{ chatId: CHAT, action: 'request' }]);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'failed' }]);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'answered' }]);
     });
 
     it('asks for one chat per pass', async () => {
-      const { svc, engine } = withHistory({ chats: `${CHAT},628111@c.us` });
+      const requestOlderHistory = jest.fn(() => answered(5, anchorOf('X', 1)));
+      const { svc } = withHistory({ chats: `${CHAT},628111@c.us` }, requestOlderHistory);
+      quiet(svc);
       await addRow('A', { timestamp: 500 });
       await addRow('B', { timestamp: 500, chatId: '628111@c.us' });
-      expect(await svc.historyTick(0)).toHaveLength(1);
-      expect(engine.requestOlderHistory).toHaveBeenCalledTimes(1);
+      expect(await svc.historyTick()).toHaveLength(1);
+      expect(requestOlderHistory).toHaveBeenCalledTimes(1);
     });
 
     it('does not ask for a chat with no messages to start from', async () => {
       const { svc, engine } = withHistory();
-      expect(await svc.historyTick(0)).toEqual([{ chatId: CHAT, action: 'done' }]);
+      quiet(svc);
+      expect(await svc.historyTick()).toEqual([{ chatId: CHAT, action: 'done' }]);
       expect(engine.requestOlderHistory).not.toHaveBeenCalled();
     });
   });
