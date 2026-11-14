@@ -8,6 +8,7 @@ import { WhatsAppWebJsPlugin } from './builtin/whatsapp-web-js';
 import { BaileysPlugin } from './builtin/baileys';
 import { createLogger } from '../common/services/logger.service';
 import { BaileysMessageStoreService } from './adapters/baileys-message-store.service';
+import { BaileysMediaRefStoreService } from './adapters/baileys-media-ref-store.service';
 import { LidMappingStoreService } from './identity/lid-mapping-store.service';
 import { ChatStateStoreService } from './adapters/baileys-chat-state-store.service';
 import { StoredChatPreviewService } from './adapters/baileys-stored-chat-previews.service';
@@ -41,6 +42,7 @@ export class EngineFactory implements OnModuleInit {
     private readonly lidMappingStore: LidMappingStoreService,
     private readonly chatStateStore: ChatStateStoreService,
     private readonly storedChatPreviews?: StoredChatPreviewService,
+    private readonly baileysMediaRefStore?: BaileysMediaRefStoreService,
   ) {
     this.engineType = this.configService.get<string>('engine.type') ?? 'whatsapp-web.js';
   }
@@ -90,6 +92,7 @@ export class EngineFactory implements OnModuleInit {
         this.lidMappingStore,
         this.chatStateStore,
         this.storedChatPreviews,
+        this.baileysMediaRefStore,
       ),
       engineConfig,
     );

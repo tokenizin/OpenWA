@@ -35,6 +35,41 @@ export interface BaileysMessageStore {
   clearSession(sessionId: string): Promise<void>;
 }
 
+/** What kind of attachment a media reference points at. */
+export type MediaRefKind = 'image' | 'video' | 'audio' | 'document' | 'sticker';
+
+/**
+ * Everything needed to fetch (and decrypt) one message's attachment later: the key and the WhatsApp-side path, plus the
+ * size and hashes WhatsApp checks it against. History sync delivers these and no file bytes, so a history message's
+ * attachment can only be fetched if its reference was kept at the time. The key decrypts the file: treat it like session data.
+ */
+export interface MediaRef {
+  /** The message's id as the engine stores it (`messages.waMessageId`). */
+  waMessageId: string;
+  /** The neutral chat id the message was filed under. */
+  chatId: string;
+  fromMe: boolean;
+  kind: MediaRefKind;
+  mimetype: string | null;
+  fileLength: number | null;
+  /** The attachment's encryption key, base64. */
+  mediaKey: string;
+  directPath: string | null;
+  url: string | null;
+  fileEncSha256: string | null;
+  fileSha256: string | null;
+  /** When WhatsApp issued the key, unix seconds. */
+  mediaKeyTimestamp: number | null;
+  /** When the message was sent, unix seconds. */
+  messageTimestamp: number | null;
+}
+
+/** Persists media references seen in a history sync. Best effort: a failed write must never fail the sync. */
+export interface BaileysMediaRefStore {
+  /** Insert or refresh the references; a row already tracked keeps its download progress. Returns how many were written. */
+  putMany(sessionId: string, refs: MediaRef[]): Promise<number>;
+}
+
 /**
  * Per-call construction config for {@link BaileysAdapter}. Engine-neutral fields come from the
  * factory; `authDir` is the base multi-file auth directory from the opaque `engine.baileys.*` blob
@@ -55,6 +90,8 @@ export interface BaileysAdapterConfig {
   chatStateStore?: ChatStateStore;
   /** The newest stored message per chat, read once per engine to list the chats a new engine starts without. */
   storedChatPreviews?: StoredChatPreviewSource;
+  /** Where a history sync's attachment references are kept so the files can be fetched later. Optional: absent means not kept. */
+  mediaRefStore?: BaileysMediaRefStore;
 }
 
 /**

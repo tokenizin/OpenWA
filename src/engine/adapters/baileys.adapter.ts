@@ -178,6 +178,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
         accept?: Parameters<BaileysSessionStore['recordMessageEdit']>[4],
       ) => this.sessionStore.recordMessageEdit(chatId, messageId, text, type, accept),
       putStoredMessage: msg => this.config.messageStore?.put(this.config.dbSessionId, msg),
+      putMediaRefs: refs => this.config.mediaRefStore?.putMany(this.config.dbSessionId, refs),
       updateStoredMessage: (messageId, change) =>
         this.config.messageStore?.update(this.config.dbSessionId, messageId, change),
       removeStoredMessage: (messageId, shouldRemove) =>

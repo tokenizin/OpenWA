@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { EngineFactory } from './engine.factory';
 import { BaileysStoredMessage } from './adapters/baileys-stored-message.entity';
 import { BaileysMessageStoreService } from './adapters/baileys-message-store.service';
+import { BaileysMediaRef } from './adapters/baileys-media-ref.entity';
+import { BaileysMediaRefStoreService } from './adapters/baileys-media-ref-store.service';
 import { LidMapping } from './identity/lid-mapping.entity';
 import { LidMappingStoreService } from './identity/lid-mapping-store.service';
 import { ChatState } from './adapters/baileys-chat-state.entity';
@@ -13,13 +15,14 @@ import { EngineRegistry } from './engine-registry.service';
 
 @Global()
 @Module({
-  imports: [TypeOrmModule.forFeature([BaileysStoredMessage, LidMapping, ChatState, Message], 'data')],
+  imports: [TypeOrmModule.forFeature([BaileysStoredMessage, BaileysMediaRef, LidMapping, ChatState, Message], 'data')],
   // EngineRegistry is exported from this @Global module so the feature services that only need a
   // live engine can inject it directly, instead of importing SessionModule to reach the lifecycle
   // owner. It is a singleton by DI, which is what makes it a safe single source of truth.
   providers: [
     EngineFactory,
     BaileysMessageStoreService,
+    BaileysMediaRefStoreService,
     LidMappingStoreService,
     ChatStateStoreService,
     StoredChatPreviewService,

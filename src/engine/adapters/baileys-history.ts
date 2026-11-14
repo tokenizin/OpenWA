@@ -15,6 +15,8 @@ import {
   keyParticipant,
 } from './baileys-message-mapper';
 import { BAILEYS_QUERY_BUDGET_MS, withQueryDeadline } from './baileys-query-deadline';
+import { extractMediaRef } from './baileys-media-ref';
+import type { MediaRef } from '../types/baileys.types';
 import { type createLogger } from '../../common/services/logger.service';
 
 /**
@@ -56,6 +58,11 @@ export interface BaileysHistoryHost {
   /** The currently-registered onHistoryMessages callback, if any (assigned at initialize()). */
   getOnHistoryMessages(): EngineEventCallbacks['onHistoryMessages'];
   getStoredWriteGeneration?(): number;
+  /**
+   * Keep the attachment references a history sync delivered, so the files can be fetched later. The sync carries a key and
+   * a path for each attachment and never the file. Optional: absent means references are not kept.
+   */
+  putMediaRefs?(refs: MediaRef[]): Promise<unknown> | undefined;
 }
 
 /**
@@ -169,6 +176,7 @@ export class BaileysHistory {
     if (!current()) return;
     const nameUpdates: { id: string; notify: string }[] = [];
     const mapped: IncomingMessage[] = [];
+    const mediaRefs: MediaRef[] = [];
     const revokes: { message: WAMessage; target: WAMessageKey }[] = [];
     // An id can name messages of different chats: each mapped message keeps its own source, and a revoke is
     // matched with the message of its own chat.
@@ -186,6 +194,14 @@ export class BaileysHistory {
       if (incoming) {
         mapped.push(incoming);
         sources.set(incoming, msg);
+        // The mapped record is media-free by design; the original still carries the key and path of an attachment.
+        const ref = extractMediaRef(b.normalizeMessageContent(msg.message) ?? msg.message, {
+          id: incoming.id,
+          chatId: incoming.chatId,
+          fromMe: incoming.fromMe,
+          timestamp: Number.isFinite(incoming.timestamp) ? incoming.timestamp : null,
+        });
+        if (ref) mediaRefs.push(ref);
       } else if (msg.key?.remoteJid) {
         const content = b.normalizeMessageContent(msg.message) ?? msg.message;
         const protocol = content?.protocolMessage;
@@ -193,6 +209,17 @@ export class BaileysHistory {
           revokes.push({ message: msg, target: protocol.key });
         }
       }
+    }
+    // Best effort: a reference that cannot be kept must never fail the sync that delivered it.
+    if (mediaRefs.length) {
+      try {
+        await this.host.putMediaRefs?.(mediaRefs);
+      } catch (err) {
+        this.host.logger.warn(
+          `History sync: could not keep ${mediaRefs.length} media reference(s): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (!current()) return;
     }
     // Targets can precede or follow their revokes, including across separate history chunks.
     const crossFormRevokes: { confirmedKey: string; extra: IncomingMessage }[] = [];

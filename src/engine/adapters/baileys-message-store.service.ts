@@ -15,7 +15,7 @@ import { positiveIntFromEnv } from '../../common/utils/env-int';
  * Postgres (`23503`). TypeORM wraps the driver error in a QueryFailedError, so check both the
  * wrapper and `driverError`.
  */
-function isMissingParentSessionError(err: unknown): boolean {
+export function isMissingParentSessionError(err: unknown): boolean {
   const e = err as { code?: string; driverError?: { code?: string }; message?: string };
   const code = e?.driverError?.code ?? e?.code;
   if (code === '23503') {
