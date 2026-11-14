@@ -961,4 +961,98 @@ describe('ChatMediaArchiveService', () => {
       clearInterval.mockRestore();
     });
   });
+
+  describe('fetched attachments of an existing row (history sync)', () => {
+    const history = (over: Partial<Message> = {}) => saveRow(undefined, over);
+
+    it('finds the row by chat candidates and says whether it already has a file', async () => {
+      const row = await history({ waMessageId: 'H1' });
+      const svc = enabled();
+      expect(await svc.findMediaRow('sess-1', ['628111@c.us', '628111@s.whatsapp.net'], 'H1')).toEqual({
+        id: row.id,
+        archived: false,
+      });
+      await repository.update({ id: row.id }, { mediaPath: 'chat-media/sess-1/x.jpg', mediaMimetype: 'image/jpeg' });
+      expect(await svc.findMediaRow('sess-1', ['628111@c.us'], 'H1')).toEqual({ id: row.id, archived: true });
+    });
+
+    it('finds nothing in another chat, another session, or for a revoked message', async () => {
+      await history({ waMessageId: 'H2' });
+      await history({ waMessageId: 'H3', type: 'revoked' });
+      const svc = enabled();
+      expect(await svc.findMediaRow('sess-1', ['someone-else@c.us'], 'H2')).toBeNull();
+      expect(await svc.findMediaRow('sess-2', ['628111@c.us'], 'H2')).toBeNull();
+      expect(await svc.findMediaRow('sess-1', ['628111@c.us'], 'H3')).toBeNull();
+      expect(await svc.findMediaRow('sess-1', ['628111@c.us'], 'missing')).toBeNull();
+    });
+
+    it('stores the bytes and points the row at them, so the media route serves them', async () => {
+      const row = await history({ waMessageId: 'H4' });
+      const svc = enabled();
+      const out = await svc.archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png');
+      expect(out.status).toBe('archived');
+      const stored = await repository.findOneByOrFail({ id: row.id });
+      expect(stored.mediaPath?.startsWith(`${CHAT_MEDIA_PREFIX}sess-1/`)).toBe(true);
+      expect(stored.mediaMimetype).toBe('image/png');
+      expect(await storageService.getFile(stored.mediaPath!)).toEqual(PNG);
+      expect(await svc.getMedia('sess-1', ['628111@c.us'], 'H4')).toEqual({
+        path: stored.mediaPath,
+        mimetype: 'image/png',
+      });
+    });
+
+    it('does nothing while the archive is off', async () => {
+      const row = await history({ waMessageId: 'H5' });
+      expect(await build().archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png')).toEqual({
+        status: 'disabled',
+      });
+      expect((await repository.findOneByOrFail({ id: row.id })).mediaPath).toBeNull();
+    });
+
+    it('refuses a file over the cap and an empty one, writing nothing', async () => {
+      const row = await history({ waMessageId: 'H6' });
+      const svc = enabled({ 'chatMedia.maxBytes': 4 });
+      expect(await svc.archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png')).toEqual({
+        status: 'too-large',
+      });
+      expect(await svc.archiveFetched({ id: row.id, sessionId: 'sess-1' }, Buffer.alloc(0), 'image/png')).toEqual({
+        status: 'failed',
+      });
+      const files: string[] = [];
+      for await (const f of storageService.iterateFiles('')) files.push(f);
+      expect(files).toEqual([]);
+    });
+
+    it('first pointer wins: a row that already has a file keeps it, and the surplus copy is deleted', async () => {
+      const row = await history({
+        waMessageId: 'H7',
+        mediaPath: 'chat-media/sess-1/first.png',
+        mediaMimetype: 'image/png',
+      });
+      expect(await enabled().archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png')).toEqual({
+        status: 'already',
+      });
+      expect((await repository.findOneByOrFail({ id: row.id })).mediaPath).toBe('chat-media/sess-1/first.png');
+      const files: string[] = [];
+      for await (const f of storageService.iterateFiles('')) files.push(f);
+      expect(files).toEqual([]);
+    });
+
+    it('does not bring back the media of a message revoked meanwhile', async () => {
+      const row = await history({ waMessageId: 'H8', type: 'revoked' });
+      expect(await enabled().archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png')).toEqual({
+        status: 'already',
+      });
+      expect((await repository.findOneByOrFail({ id: row.id })).mediaPath).toBeNull();
+    });
+
+    it('reports a failed write instead of throwing', async () => {
+      const row = await history({ waMessageId: 'H9' });
+      jest.spyOn(storageService, 'putFile').mockRejectedValueOnce(new Error('disk full'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect(await enabled().archiveFetched({ id: row.id, sessionId: 'sess-1' }, PNG, 'image/png')).toEqual({
+        status: 'failed',
+      });
+    });
+  });
 });

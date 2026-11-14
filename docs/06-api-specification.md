@@ -1697,6 +1697,18 @@ archive. On whatsapp-web.js the own-send echo downloads the media of every messa
 sends, a URL-based one included, and when the echo row is written first its bytes are kept, so the
 route can answer `200` or `404` for the same kind of send.
 
+**Attachments from before the link (`MEDIA_REF_FETCH_ENABLED`).** A history sync delivers each
+attachment as an encrypted reference (a key and a path) and never the file, so a message from before
+the link has a row and no media. The engine keeps those references (`baileys_media_refs`); with
+`MEDIA_REF_FETCH_ENABLED=true` (and `CHAT_MEDIA_ARCHIVE_ENABLED=true`) a background fetcher takes one
+reference per `MEDIA_REF_FETCH_INTERVAL_MS`, downloads the file from WhatsApp, or has the phone upload
+it again when WhatsApp no longer holds it, and stores it as an archived file that this route then
+serves. A reference's `status` records the result: `done`, `expired` (WhatsApp no longer holds the
+file and the phone could not supply it), `failed`, or `pending`. With `MEDIA_REF_HISTORY_ENABLED=true`
+the gateway also asks the phone for older messages in the chats named in `MEDIA_REF_FETCH_CHATS`, which
+brings more references in. WhatsApp keeps media for a limited time, and a re-upload needs the phone
+online, so not every old attachment can be recovered.
+
 The inline fallback also keeps an inbound message's media downloadable after
 `CHAT_MEDIA_ARCHIVE_TTL_DAYS` retention purges the archived file, since retention leaves the inline
 copy in place.

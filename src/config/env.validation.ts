@@ -175,6 +175,15 @@ export function validateEnv(config: EnvConfig): EnvConfig {
   if (rawEnum('MESSAGE_INLINE_MEDIA') === 'archive' && config.CHAT_MEDIA_ARCHIVE_ENABLED !== 'true') {
     errors.push('MESSAGE_INLINE_MEDIA=archive needs CHAT_MEDIA_ARCHIVE_ENABLED=true');
   }
+  // The fetcher stores what it fetches through the archive, so with the archive off it would download
+  // files and have nowhere to put them. Refuse that rather than spend requests on WhatsApp for nothing.
+  if (config.MEDIA_REF_FETCH_ENABLED === 'true' && config.CHAT_MEDIA_ARCHIVE_ENABLED !== 'true') {
+    errors.push('MEDIA_REF_FETCH_ENABLED=true needs CHAT_MEDIA_ARCHIVE_ENABLED=true');
+  }
+  // Asking the phone for older history is only ever done for named chats.
+  if (config.MEDIA_REF_HISTORY_ENABLED === 'true' && !str('MEDIA_REF_FETCH_CHATS')) {
+    errors.push('MEDIA_REF_HISTORY_ENABLED=true needs MEDIA_REF_FETCH_CHATS (the chats to ask for)');
+  }
   // The S3 key root. A prefix that is absolute, traverses, or is only slashes would put this
   // deployment's objects (and its orphan sweeps' deletes) at the bucket root or outside its own root;
   // one with an empty or '.' segment builds keys an S3-compatible store refuses on every write.
@@ -553,6 +562,16 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'CHAT_MEDIA_ARCHIVE_MAX_BYTES',
     'CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS',
     'CHAT_MEDIA_ORPHAN_GRACE_MS',
+    // Same parseInt read: `20s` became a 20 ms fetch tick, which is a request to WhatsApp every 20 ms.
+    'MEDIA_REF_FETCH_INTERVAL_MS',
+    'MEDIA_REF_FETCH_MAX_ATTEMPTS',
+    'MEDIA_REF_FETCH_TIMEOUT_MS',
+    'MEDIA_REF_FETCH_RETRY_BASE_MS',
+    'MEDIA_REF_FETCH_RETRY_MAX_MS',
+    'MEDIA_REF_HISTORY_INTERVAL_MS',
+    'MEDIA_REF_HISTORY_PAGE_SIZE',
+    'MEDIA_REF_HISTORY_MAX_PAGES',
+    'MEDIA_REF_HISTORY_WAIT_MS',
     'STATUS_MEDIA_MAX_BYTES',
     'STATUS_ORPHAN_SWEEP_INTERVAL_MS',
     'STATUS_ORPHAN_GRACE_MS',

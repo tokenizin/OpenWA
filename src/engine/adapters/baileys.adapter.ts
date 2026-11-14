@@ -9,6 +9,7 @@ import { BaileysContacts } from './baileys-contacts';
 import { BaileysEvents, type GroupMember } from './baileys-events';
 import { BaileysGroups } from './baileys-groups';
 import { BaileysHistory, toUnixSeconds } from './baileys-history';
+import { BaileysMediaFetch } from './baileys-media-fetch';
 import { type BaileysEngineHost } from './baileys-host';
 import { OwnSendRegistry } from './baileys-own-sends';
 import { BaileysLifecycle } from './baileys-lifecycle';
@@ -49,6 +50,8 @@ import {
   ChatSummary,
   StatusPostOptions,
   StoredChatMessageLookup,
+  HistoryAnchor,
+  MediaFetchOutcome,
 } from '../interfaces/whatsapp-engine.interface';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
@@ -56,7 +59,7 @@ import { EngineNotSentError, markNothingSent } from '../../common/errors/engine-
 import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { createLogger } from '../../common/services/logger.service';
-import { BaileysAdapterConfig } from '../types/baileys.types';
+import { BaileysAdapterConfig, MediaRef } from '../types/baileys.types';
 import { baileysAuthDir } from '../auth-dir-paths';
 import { BaileysSessionStore } from './baileys-session-store';
 import { inboundMediaConcurrency } from './inbound-media-cap';
@@ -90,6 +93,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
   private readonly channels: BaileysChannels;
   private readonly catalog: BaileysCatalog;
   private readonly history: BaileysHistory;
+  private readonly mediaFetch: BaileysMediaFetch;
   private readonly events: BaileysEvents;
   private readonly lifecycle: BaileysLifecycle;
   private callbacks: EngineEventCallbacks = {};
@@ -281,6 +285,7 @@ export class BaileysAdapter implements IWhatsAppEngine {
     this.channels = new BaileysChannels(host);
     this.catalog = new BaileysCatalog(host);
     this.history = new BaileysHistory(host);
+    this.mediaFetch = new BaileysMediaFetch(host);
     this.lifecycle = new BaileysLifecycle(host);
   }
 
@@ -631,6 +636,17 @@ export class BaileysAdapter implements IWhatsAppEngine {
 
   async clearChatMessages(chatId: string, stored?: StoredChatMessageLookup): Promise<boolean> {
     return this.contacts.clearChatMessages(chatId, stored);
+  }
+
+  // ----- Attachments and history older than the link (see baileys-media-fetch.ts) -----
+
+  fetchMediaByRef(ref: MediaRef, opts?: { maxBytes?: number; timeoutMs?: number }): Promise<MediaFetchOutcome> {
+    return this.mediaFetch.fetchByRef(ref, opts);
+  }
+
+  requestOlderHistory(chatId: string, anchor: HistoryAnchor, count: number): Promise<string> {
+    this.ensureReady();
+    return this.mediaFetch.requestOlder(chatId, anchor, count);
   }
 
   // ----- Gated: unsupported on Baileys (reasons inline) -----

@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 import { Message } from '../message/entities/message.entity';
 import { ChatMediaArchiveService } from './chat-media-archive.service';
+import { MediaRefFetcherService } from './media-ref-fetcher.service';
+import { BaileysMediaRef } from '../../engine/adapters/baileys-media-ref.entity';
 import { StorageModule } from '../../common/storage/storage.module';
 
 /**
@@ -11,8 +13,8 @@ import { StorageModule } from '../../common/storage/storage.module';
  * already imports SessionModule. Mirrors StatusStoreModule, which sits in the same position.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Message], 'data'), ConfigModule, StorageModule],
-  providers: [ChatMediaArchiveService],
+  imports: [TypeOrmModule.forFeature([Message, BaileysMediaRef], 'data'), ConfigModule, StorageModule],
+  providers: [ChatMediaArchiveService, MediaRefFetcherService],
   exports: [ChatMediaArchiveService],
 })
 export class ChatMediaModule {}

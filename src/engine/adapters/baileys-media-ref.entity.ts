@@ -9,6 +9,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { Session } from '../../modules/session/entities/session.entity';
+import type { MediaRefKind } from '../types/baileys.types';
 
 /** Where a reference stands: waiting to be downloaded, downloaded, gone from WhatsApp, or failed for now. */
 export type MediaRefStatus = 'pending' | 'done' | 'expired' | 'failed';
@@ -47,7 +48,7 @@ export class BaileysMediaRef {
   fromMe!: boolean;
 
   @Column({ type: 'varchar' })
-  kind!: string;
+  kind!: MediaRefKind;
 
   @Column({ type: 'varchar', nullable: true })
   mimetype!: string | null;

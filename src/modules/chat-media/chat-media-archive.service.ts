@@ -231,6 +231,69 @@ export class ChatMediaArchiveService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * The persisted row of a message whose attachment is to be fetched later (a history message), and
+   * whether it already has a file. Matched by session and WhatsApp id within the chat the reference was
+   * filed under; null when the row is not there yet or is revoked. A history sync keeps the reference and
+   * persists the row in the same pass, so a miss is usually a row that has not landed, not a lost one.
+   */
+  async findMediaRow(
+    sessionId: string,
+    chatIds: string[],
+    waMessageId: string,
+  ): Promise<{ id: string; archived: boolean } | null> {
+    const row = await this.repository.findOne({
+      where: { sessionId, chatId: In(chatIds), waMessageId },
+      select: { id: true, mediaPath: true, type: true },
+    });
+    if (!row || row.type === 'revoked') return null;
+    return { id: row.id, archived: Boolean(row.mediaPath) };
+  }
+
+  /**
+   * Store the bytes of an attachment fetched from WhatsApp after the fact and point the existing row at
+   * them. The counterpart of {@link archive} for media that was never inline: the row is already there
+   * and has no copy, so there is no inline snapshot to compare against, only the first-pointer-wins and
+   * not-revoked conditions. Never throws.
+   */
+  async archiveFetched(
+    row: { id: string; sessionId: string },
+    bytes: Buffer,
+    mimetype: string,
+  ): Promise<{ status: 'archived'; key: string } | { status: 'disabled' | 'too-large' | 'already' | 'failed' }> {
+    if (!this.enabled) return { status: 'disabled' };
+    const maxBytes = this.configService.get<number>('chatMedia.maxBytes', DEFAULT_ARCHIVE_MAX_BYTES);
+    if (bytes.length > maxBytes) return { status: 'too-large' };
+    if (bytes.length === 0) return { status: 'failed' };
+    const key = `${CHAT_MEDIA_PREFIX}${row.sessionId}/${randomUUID()}.${extFromMimetype(mimetype)}`;
+    try {
+      await this.storageService.putFile(key, bytes);
+    } catch (error) {
+      this.logger.error(
+        `Failed to archive fetched media for session ${row.sessionId}, message ${row.id}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      return { status: 'failed' };
+    }
+    try {
+      const result = await this.repository.update(
+        { id: row.id, type: Not('revoked'), mediaPath: IsNull() },
+        { mediaPath: key, mediaMimetype: mimetype },
+      );
+      if (result.affected === 0) {
+        // Revoked meanwhile, or another writer pointed the row at a file first: this copy is surplus.
+        await this.storageService.deleteFile(key).catch(() => undefined);
+        return { status: 'already' };
+      }
+    } catch (error) {
+      this.logger.warn(`Fetched chat media ${key} written but not published; the orphan sweep reaps it`, {
+        error: String(error),
+      });
+      return { status: 'failed' };
+    }
+    return { status: 'archived', key };
+  }
+
+  /**
    * Resolve the archived media of one message, addressed the way the REST layer addresses messages
    * (session + chat + WhatsApp message id). Returns null when nothing is archived for it.
    */

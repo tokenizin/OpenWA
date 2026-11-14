@@ -466,6 +466,33 @@ export default () => ({
     // verified, so the bytes live once, in the file store; reads go through the media route.
     // Validated at boot to need CHAT_MEDIA_ARCHIVE_ENABLED=true.
     inlineMode: process.env.MESSAGE_INLINE_MEDIA === 'archive' ? ('archive' as const) : ('inline' as const),
+    // Fetching attachments a history sync only left references to (baileys_media_refs). Off by default:
+    // it asks WhatsApp, and the phone, for files long after the fact. Needs CHAT_MEDIA_ARCHIVE_ENABLED.
+    refFetch: (() => {
+      const pos = (key: string, fallback: number): number => {
+        const n = parseInt(process.env[key] ?? '', 10);
+        return Number.isFinite(n) && n > 0 ? n : fallback;
+      };
+      return {
+        enabled: process.env.MEDIA_REF_FETCH_ENABLED === 'true',
+        // One file per tick, so this is the rate: the default 20 s is three files a minute.
+        intervalMs: pos('MEDIA_REF_FETCH_INTERVAL_MS', 20_000),
+        // Comma-separated chat ids (or bare phone numbers). Empty means every chat.
+        chats: process.env.MEDIA_REF_FETCH_CHATS ?? '',
+        maxAttempts: pos('MEDIA_REF_FETCH_MAX_ATTEMPTS', 5),
+        // One file, the phone's answer to a re-upload request included.
+        timeoutMs: pos('MEDIA_REF_FETCH_TIMEOUT_MS', 90_000),
+        retryBaseMs: pos('MEDIA_REF_FETCH_RETRY_BASE_MS', 15 * 60_000),
+        retryMaxMs: pos('MEDIA_REF_FETCH_RETRY_MAX_MS', 6 * 60 * 60_000),
+        // Asking the phone for messages older than what is held. Only ever for the chats listed in
+        // MEDIA_REF_FETCH_CHATS: with that list empty nothing is asked.
+        historyEnabled: process.env.MEDIA_REF_HISTORY_ENABLED === 'true',
+        historyIntervalMs: pos('MEDIA_REF_HISTORY_INTERVAL_MS', 60_000),
+        historyPageSize: Math.min(pos('MEDIA_REF_HISTORY_PAGE_SIZE', 50), 50),
+        historyMaxPages: pos('MEDIA_REF_HISTORY_MAX_PAGES', 40),
+        historyWaitMs: pos('MEDIA_REF_HISTORY_WAIT_MS', 120_000),
+      };
+    })(),
   },
 
   // Session ownership across processes. A session's engine runs in exactly one process; these

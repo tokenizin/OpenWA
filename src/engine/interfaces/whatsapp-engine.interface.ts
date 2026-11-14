@@ -15,6 +15,7 @@
 // to its own dialect. Full inbound + outbound conformance is being rolled out per-engine.)
 
 import type { ChatKind } from '../identity/wa-id';
+import type { MediaRef } from '../types/baileys.types';
 
 export enum EngineStatus {
   DISCONNECTED = 'disconnected',
@@ -25,6 +26,33 @@ export enum EngineStatus {
   ACTION_REQUIRED = 'action_required',
   FAILED = 'failed',
 }
+
+/** The oldest message already held for a chat: older ones are requested from just before it. */
+export interface HistoryAnchor {
+  id: string;
+  fromMe: boolean;
+  /** Seconds since the epoch. */
+  timestamp: number;
+  /** The sender of a group message; absent in a personal chat. */
+  participant?: string;
+}
+
+export type MediaFetchFailure =
+  /** WhatsApp no longer holds the file and the phone could not or would not upload it again. Final. */
+  | 'expired'
+  /** The phone did not answer the re-upload request in time (off, offline, or the app closed). Worth retrying. */
+  | 'phone-unavailable'
+  /** Bigger than the cap asked for. Final for that cap. */
+  | 'too-large'
+  /** The address is not a WhatsApp media host; not fetched. Final. */
+  | 'refused-host'
+  /** The engine has no connection right now. Worth retrying. */
+  | 'not-ready'
+  /** Anything else (a broken reference, a failed decrypt, a network error). */
+  | 'error';
+
+export type MediaFetchOutcome =
+  { ok: true; bytes: Buffer; mimetype: string } | { ok: false; reason: MediaFetchFailure; detail: string };
 
 export interface MessageResult {
   id: string;
@@ -1244,6 +1272,22 @@ export interface SessionLifecycleCapability {
    * cheap local check. Polled periodically by the session watchdog.
    */
   probeLiveness?(): Promise<boolean>;
+
+  /**
+   * Fetch one attachment from the reference a history sync left behind (`baileys_media_refs`): the
+   * encrypted copy WhatsApp still holds, or, when it no longer does, a copy the phone uploads again on
+   * request. Optional: only an engine that keeps such references has it. Never throws for an expected
+   * outcome; the reason says whether a later attempt can work (`phone-unavailable`, `error`) or not
+   * (`expired`).
+   */
+  fetchMediaByRef?(ref: MediaRef, opts?: { maxBytes?: number; timeoutMs?: number }): Promise<MediaFetchOutcome>;
+
+  /**
+   * Ask the phone for the messages older than `anchor` in one chat. The answer is not returned: the
+   * messages arrive later through the history sync, the same way a first link delivers them. Resolves
+   * with WhatsApp's request id once the request is sent. Optional, Baileys only.
+   */
+  requestOlderHistory?(chatId: string, anchor: HistoryAnchor, count: number): Promise<string>;
 
   getQRCode(): string | null;
 
