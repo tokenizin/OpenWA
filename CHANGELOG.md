@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-11-15
+
+### Added
+
+- Keep the media references WhatsApp's history sync delivers (the key and location of each attachment), so a chat's older attachments can be fetched later instead of being dropped.
+- Fetch the attachments a history sync left references to, one at a time and throttled, and ask for older history per chat. The walk back starts from the newest message and follows the phone's answers.
+- Store media-send errors with a reason of their own, so a refused send says why.
+
+### Changed
+
+- The auth and audit database connection uses PostgreSQL, as the main store does.
+
 ### Fixed
 
+- Ask the phone to upload a media file again when its link has died, instead of leaving the attachment unavailable.
+- An empty read of a chat's history no longer ends that chat's walk: the walk retries and gives up only after repeated empty reads.
 - Store the contact statuses WhatsApp delivers to some Baileys accounts as a top-level `<status>` stanza, which 0.30.1 acknowledged and dropped: `scripts/patch-baileys-status-ack.js` now decodes a stanza shaped as the status message it replaces, so it reaches the status list and the `status.received` webhook. A status that fails to decrypt is dropped, not retried (#2064). Thanks @damar-glh for the report.
 
 ## [0.30.1] - 2026-11-14
